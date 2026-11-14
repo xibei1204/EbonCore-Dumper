@@ -1,0 +1,31 @@
+{
+  "module_sha256": "64ed3cae0b5fc61f3b56cdd933b4807cb23f0ec7913590db60d1a8642de2dfec",
+  "process_event_vtable_index": 76,
+  "process_event_rva": "0x18d4d20",
+  "method": "captured root UObject vtable + FunctionFlags native test + ParmsSize reads + third argument alias",
+  "image_sha256": "1730b5b1b9e4effec373356613582f0419107079e4d0e6d5a2a213950e0c3b70",
+  "capture": "out/reflection/injected_20261114_170749",
+  "static_evidence": [
+    {
+      "address": "0x1418d4d6b",
+      "instruction": "test dword ptr [rdx + 0xb0], 0x400"
+    },
+    {
+      "address": "0x1418d4ed0",
+      "instruction": "movzx eax, word ptr [rdi + 0xb6]"
+    },
+    {
+      "address": "0x1418d4ee9",
+      "instruction": "movzx eax, word ptr [rdi + 0xb6]"
+    },
+    {
+      "address": "0x1418d503d",
+      "instruction": "movzx eax, word ptr [rdi + 0xb6]"
+    },
+    {
+      "address": "0x1418d4d53",
+      "instruction": "mov r14, r8"
+    }
+  ],
+  "live_function_call_verified": false
+}

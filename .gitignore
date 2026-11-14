@@ -1,0 +1,59 @@
+# 原生构建产物
+build/
+build-*/
+obj/
+*.obj
+*.exe
+*.dll
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.log
+
+# 运行输出（采集、SDK、清单、AES 结果）
+out/
+.work/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# 编辑器 / 系统
+.vs/
+.vscode/
+*.user
+*.suo
+Thumbs.db
+
+# 本地个人指令与一次性研究档案（保留在磁盘，不公开）
+/GEMINI.md
+/tools/probes/
+
+# 密钥、凭据、运行时快照与客户端原始资产
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+aes_key*.txt
+*.jsonl
+*.dmp
+*.dump
+*.pak
+*.utoc
+*.ucas
+*.uasset
+*.uexp
+*.ubulk
+*.umap
+*.usmap
+*.zip
+*.7z
+
+# 测试 / 打包缓存
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+*.egg-info/
