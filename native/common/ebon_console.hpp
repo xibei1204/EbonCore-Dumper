@@ -47,9 +47,12 @@ inline bool initialize(const wchar_t* title = L"EbonCore Dumper") {
 
 // Only the standalone viewer calls initialize(). Allocating a console in the
 // game changes the window picked by some platform login SDKs.
-inline bool startViewer(const std::filesystem::path& executable,DWORD targetPid,DWORD* viewerPid=nullptr) {
+inline bool startViewer(const std::filesystem::path& executable,DWORD targetPid,
+                        const std::filesystem::path& requestDir=std::filesystem::path(),
+                        DWORD* viewerPid=nullptr) {
     std::wstring command=L"\""+executable.wstring()+L"\" --log \""+g_logPath+
                          L"\" --pid "+std::to_wstring(targetPid);
+    if(!requestDir.empty())command+=L" --request-dir \""+requestDir.wstring()+L"\"";
     STARTUPINFOW startup{};
     startup.cb=sizeof(startup);
     startup.dwFlags=STARTF_USESHOWWINDOW;

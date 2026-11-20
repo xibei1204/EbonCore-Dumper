@@ -1,5 +1,6 @@
 """Exercise the built production hunter against independently encrypted Pak fixtures."""
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,7 @@ import tempfile
 import time
 import unittest
 import sys
+from contextlib import redirect_stdout
 from unittest.mock import patch
 
 from tools.ebon_cli import wait_for_aes
@@ -248,6 +250,26 @@ class NativeAesTests(unittest.TestCase):
             self.assertFalse(state["success"])
             self.assertFalse((root / "capture" / "aes" / "aes_key.txt").exists())
 
+    def test_dll_hotkey_listener_waits_for_the_request_file(self):
+        import shutil
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            dll = root / "EbonDumper.dll"
+            shutil.copy2(BUILD / "EbonDumper.dll", dll)
+            (root / "paks").mkdir()
+            encrypted_pak(root / "paks" / "fixture.pak", os.urandom(32))
+            result = subprocess.run([str(BUILD / "EbonDllSelfTest.exe"), "aes_hotkey", str(dll), str(root / "capture")],
+                                    capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            listener = json.loads((root / "capture" / "aes_hotkey_state.json").read_text())
+            self.assertEqual(listener["format"], "EbonAesHotkey-v1")
+            self.assertEqual(listener["key"], "F9")
+            self.assertFalse(listener["terminal_available"])
+            self.assertEqual(listener["runs"], 1)
+            state = json.loads((root / "capture" / "aes" / "aes_state.json").read_text())
+            self.assertEqual(state["status"], "timed_out")
+            self.assertFalse((root / "capture" / "aes" / "aes_key.txt").exists())
+
     def test_dll_constructor_failure_has_terminal_state_and_keeps_reflection_working(self):
         import shutil
         with tempfile.TemporaryDirectory() as temp:
@@ -290,6 +312,32 @@ class AesWaitTests(unittest.TestCase):
         with patch("tools.ebon_cli.time.monotonic", side_effect=[0, 181]):
             with self.assertRaisesRegex(CodegenError, "AES did not finish"):
                 wait_for_aes(Path("missing"))
+
+    def test_hotkey_armed_capture_reports_the_listener(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "aes_hotkey_state.json").write_text(json.dumps(
+                dict(format="EbonAesHotkey-v1", status="armed", key="F9", terminal_available=True)))
+            out = io.StringIO()
+            with patch("tools.ebon_cli.time.monotonic", side_effect=[0, 0, 181]), \
+                 patch("tools.ebon_cli.time.sleep", lambda *_: None), \
+                 redirect_stdout(out):
+                with self.assertRaisesRegex(CodegenError, "AES did not finish"):
+                    wait_for_aes(root, timeout=1)
+            self.assertIn("press F9 in the dumper terminal", out.getvalue())
+
+    def test_hotkey_without_terminal_points_at_the_request_file(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "aes_hotkey_state.json").write_text(json.dumps(
+                dict(format="EbonAesHotkey-v1", status="armed", key="F9", terminal_available=False)))
+            out = io.StringIO()
+            with patch("tools.ebon_cli.time.monotonic", side_effect=[0, 0, 181]), \
+                 patch("tools.ebon_cli.time.sleep", lambda *_: None), \
+                 redirect_stdout(out):
+                with self.assertRaisesRegex(CodegenError, "AES did not finish"):
+                    wait_for_aes(root, timeout=1)
+            self.assertIn("aes_hunt.request", out.getvalue())
 
 
 if __name__ == "__main__":

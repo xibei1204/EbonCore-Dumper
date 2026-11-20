@@ -12,7 +12,7 @@ Windows x64 / Unreal Engine 5 的只读反射采集、C++ SDK 生成与资源导
 - 用 F10 重复导出表行、资产配置、场景反射值及对象引用。
 - `resources.jsonl` **只作索引**；正文保存在各分类 `data/*.jsonl` 独立文件中。
 - 保全 loose / Pak / IoStore 资源，保留来源路径、状态与 SHA-256。
-- 搜索 AES Pak 索引密钥，只接受完整索引 SHA-1 验证通过的候选。
+- 搜索 AES Pak 索引密钥，只接受完整索引 SHA-1 验证通过的候选；在本次采集的 Dumper 终端窗口内按 F9 触发（也可写 `aes_hunt.request`）。
 
 这不是完整资源解包器或服务端实现：未加载对象不在内存采集范围，IoStore 原始 chunk 不等于重建的 `.uasset`；未解析字段、默认对象空值和部分表均保留明确标记。
 

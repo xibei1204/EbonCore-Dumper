@@ -20,6 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from tools.ebon.sdk_codegen import CodegenError, generate_sdk
 from tools.ebon.cpp_sdk import generate_cpp_sdk
 from tools.ebon.containers import ContainerError, PakFile, UtocFile
+from tools.ebon.network_version import checked_network_version
 from tools.ebon.resource_bundle import BundleLimits, dump_resources
 from tools.ebon.resource_bodies import export_resource_bodies
 from tools.ebon.oodle import OodleDecoder
@@ -267,9 +268,13 @@ def inject_and_dump(
     injector_args: list[str] | None = None,
     wait_aes: bool = False,
     aes_wait_seconds: float = 180.0,
+    wait_network_version: bool = False,
+    network_version_wait_seconds: float = 600.0,
 ) -> int:
     if wait_aes and (not math.isfinite(aes_wait_seconds) or aes_wait_seconds <= 0):
         raise CodegenError("AES wait timeout must be positive and finite")
+    if wait_network_version and (not math.isfinite(network_version_wait_seconds) or network_version_wait_seconds <= 0):
+        raise CodegenError("NetworkVersion wait timeout must be positive and finite")
     if not injector.is_file():
         raise CodegenError(f"injector executable does not exist: {injector}")
     if not dumper.is_file():
@@ -308,6 +313,9 @@ def inject_and_dump(
     if not state.get("success"):
         print(json.dumps(state, ensure_ascii=False, indent=2), file=sys.stderr)
         return 1
+    if wait_network_version:
+        version=wait_for_network_version(dump,network_version_wait_seconds)
+        print(json.dumps(version,ensure_ascii=False,indent=2))
     if sdk is not None:
         result = generate_cpp_sdk(dump, sdk)
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -319,11 +327,25 @@ def wait_for_aes(dump: Path, timeout: float = 180.0) -> dict:
         raise CodegenError("AES wait timeout must be positive and finite")
     deadline = time.monotonic() + timeout
     state_path = dump / "aes" / "aes_state.json"
+    hotkey_path = dump / "aes_hotkey_state.json"
     last_status = None
+    hotkey_hint = False
     while time.monotonic() < deadline:
         try:
             state = json.loads(state_path.read_text(encoding="utf-8"))
         except (FileNotFoundError, PermissionError, json.JSONDecodeError):
+            # Hotkey mode keeps the scan disarmed until F9, so report the
+            # listener state instead of waiting silently for a scan directory.
+            if not hotkey_hint:
+                try:
+                    hotkey = json.loads(hotkey_path.read_text(encoding="utf-8"))
+                except (FileNotFoundError, PermissionError, json.JSONDecodeError):
+                    hotkey = None
+                if isinstance(hotkey, dict) and hotkey.get("status") in {"armed", "running"}:
+                    where = ("press F9 in the dumper terminal" if hotkey.get("terminal_available")
+                             else "no dumper terminal; write aes_hunt.request")
+                    print(f"AES: {hotkey['status']}; {where}; listener: {hotkey_path}", flush=True)
+                    hotkey_hint = True
             time.sleep(0.25)
             continue
         if not isinstance(state, dict) or state.get("format") != "EbonAES-v1":
@@ -369,6 +391,24 @@ def wait_for_capture(dump: Path, timeout: float = 300.0) -> dict:
     raise CodegenError(f"capture did not finish within {timeout:g} seconds; inspect {dump / 'dump_state.json'} and the dumper console")
 
 
+def wait_for_network_version(capture: Path, timeout: float = 600.0) -> dict:
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise CodegenError("NetworkVersion wait timeout must be positive and finite")
+    deadline=time.monotonic()+timeout
+    while time.monotonic()<deadline:
+        try:version=checked_network_version(capture)
+        except (FileNotFoundError,PermissionError,json.JSONDecodeError):
+            time.sleep(0.25);continue
+        except ValueError as error:raise CodegenError("invalid NetworkVersion evidence: "+str(error)) from error
+        if version['verified']:
+            print(f"NetworkVersion: {version['value']} (0x{version['value']:08x})",flush=True)
+            return version
+        if version['status'] in {'unsupported_profile','disabled','profile_mismatch','invalid_binding'}:
+            raise CodegenError("NetworkVersion cannot be observed: "+version['status'])
+        time.sleep(0.25)
+    raise CodegenError(f"NetworkVersion not initialized/observed within {timeout:g} seconds; no guessed value was exported")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="ebon-dumper")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -377,6 +417,11 @@ def main(argv: list[str] | None = None) -> int:
     sdk.add_argument("--out", required=True, help="SDK output directory")
     sdk.add_argument("--format", choices=("cpp", "metadata"), default="cpp", help="real C++ declarations (default) or legacy reflection metadata")
     sdk.add_argument("--network-capture", help="separate same-build runtime snapshot for cross-checked network tables; full SDK layouts still use --dump")
+    version=commands.add_parser("verify-network-version",help="revalidate saved getter/Hello/cache bytes")
+    version.add_argument("--capture",required=True)
+    version_wait=commands.add_parser("wait-network-version",help="wait for an initialized real UE checksum")
+    version_wait.add_argument("--capture",required=True)
+    version_wait.add_argument("--seconds",type=float,default=600)
     resources = commands.add_parser("inventory-resources", help="inventory Pak and IoStore containers")
     resources.add_argument("--client", required=True, help="read-only client installation directory")
     resources.add_argument("--out", required=True, help="new inventory output directory")
@@ -428,6 +473,8 @@ def main(argv: list[str] | None = None) -> int:
     inject.add_argument("--sdk-out", help="optional separate SDK output directory")
     inject.add_argument("--no-sdk", action="store_true", help="capture reflection without generating C++ headers")
     inject.add_argument("--wait-aes", action="store_true", help="also wait for this capture's AES worker; require a verified key for exit 0")
+    inject.add_argument("--wait-network-version",action="store_true",help="require a byte-revalidated initialized NetworkVersion before SDK generation/exit 0")
+    inject.add_argument("--network-version-wait-seconds",type=float,default=600)
     inject.add_argument("--aes-wait-seconds", type=float, default=180, help="maximum additional AES wait time")
     inject.add_argument("--wait-ms", type=int, help="injector loader wait time")
     inject.add_argument("--capture-delay", type=int, default=0, help="delay reflection capture by 0..300 seconds for network initialization")
@@ -442,6 +489,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        if args.command in {'verify-network-version','wait-network-version'}:
+            if args.command=='wait-network-version':result=wait_for_network_version(Path(args.capture),args.seconds)
+            else:
+                try:result=checked_network_version(Path(args.capture))
+                except ValueError as error:raise CodegenError('Invalid NetworkVersion evidence: '+str(error)) from error
+            print(json.dumps(result,ensure_ascii=False,indent=2));return 0 if result['verified'] else 1
         decoder = None
         if args.command in {"dump-res", "extract-pak"}:
             if args.oodle_sha256 and not args.oodle_dll:
@@ -536,6 +589,8 @@ def main(argv: list[str] | None = None) -> int:
                 native_args,
                 args.wait_aes,
                 args.aes_wait_seconds,
+                args.wait_network_version,
+                args.network_version_wait_seconds,
             )
     except (CodegenError, ContainerError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)

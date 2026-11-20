@@ -126,12 +126,17 @@ SDK 目录主要内容：`SDK.hpp`、`Types.hpp`、`Enums.hpp`、`Basic.hpp`、`
 
 ### 5. AES 索引密钥搜索
 
+注入后 AES 不会自动开扫：它只在**本次采集的 Dumper 终端窗口**里按键才启动。终端自己读取自己的控制台输入队列（`CONIN$`），一旦收到 F9 就在采集目录写入 `aes_hunt.request`，游戏进程侧的监听线程消费该请求后才启动扫描。因此快捷键只存在于那个终端窗口内，游戏窗口或其他程序的按键不会触发。
+
 ```powershell
-.\run_injector.bat    # 注入采集 + 等待本次 AES 结果
+.\run_injector.bat    # 注入采集；等待后在 Dumper 终端里按 F9
 
 # 等价命令行
 python tools/ebon_cli.py inject-and-dump --injector build-aes/EbonDebugInject.exe `
   --dumper build-aes/EbonDumper.dll --no-sdk --wait-aes
+
+# 无终端（console=0）或脚本触发：直接写请求文件
+New-Item -ItemType File <本次采集目录>\aes_hunt.request
 
 # 独立只读扫描 / 离线扫描
 build-aes\EbonAesScan.exe   --pid <PID> --pak "<Pak 文件或目录>" --out out/aes/<新目录> --seconds 120
@@ -139,7 +144,7 @@ build-aes\EbonAesFinder.exe --file <镜像文件> --pak "<Pak 文件或目录>" 
 python tools/ebon_cli.py wait-aes --capture out/reflection/<本次目录> --seconds 180
 ```
 
-结果在**本次采集目录**的 `aes/`：`aes_state.json` 记录阶段、候选与失败原因；只有 `status=verified` 且 `success=true` 才写出 `aes_key.txt`，密钥不进入日志。退出码 `0` 已验证 / `1` 错误 / `2` 结束仍未找到。行为由 `profiles/nte-ue5.ini` 的 `aes_hunt`、`aes_timeout_seconds`、`aes_retry_ms`、`aes_unaligned`、`aes_pak` 控制。
+第一次按 F9 结果写 `aes/`，再次按写 `aes_2/`、`aes_3/`…，因为每次扫描都需要独占的空目录；扫描进行中再按 F9 会被忽略。`aes_hotkey_state.json` 记录监听器状态（`armed`/`running`）、`terminal_pid`、已接收次数与最近输出目录。结果在**本次采集目录**的 `aes*/`：`aes_state.json` 记录阶段、候选与失败原因；只有 `status=verified` 且 `success=true` 才写出 `aes_key.txt`，密钥不进入日志。退出码 `0` 已验证 / `1` 错误 / `2` 结束仍未找到。行为由 `profiles/nte-ue5.ini` 的 `aes_hunt`、`aes_hotkey`、`aes_timeout_seconds`、`aes_retry_ms`、`aes_unaligned`、`aes_pak` 控制；`aes_hotkey=0` 恢复注入即扫（无终端场景与自动化用）。
 
 ### 6. F10 导出资源配置值
 
@@ -293,6 +298,7 @@ EbonCore-Dumper/
 │  ├─ verify_sdk_runtime.py       # ProcessEvent 入口交叉核对
 │  ├─ request_network_capture.ps1 # 触发同进程网络快照补采
 │  └─ request_resource_capture.ps1 # 触发同进程 F10 资源采集
+│  └─ request_aes_hunt.ps1         # 等价于在 Dumper 终端按 F9
 ├─ tests/                         # Python 单元/集成测试
 ├─ docs/                          # 各轮迭代记录与证据说明
 └─ out/                           # 运行产物：reflection / sdk / resources / aes
@@ -304,7 +310,7 @@ EbonCore-Dumper/
 - `dump_state.json` 在采集开始时即创建，记录 `phase`、进度、错误与候选；只有 `success=true` 且状态为 `complete` 或 `complete_with_unresolved` 才能用于 SDK 生成。
 - 失败的采集会保留已校验的元数据供诊断，但不会被当作成功结果。
 - 注入器输出 `DONE` 只代表 DLL 加载成功，采集结果以本次目录的状态文件为准。
-- AES 的 `timed_out`/`exhausted`/`disabled`/`error` 都不代表抓取成功。
+- AES 的 `armed`（等待 F9）以及 `timed_out`/`exhausted`/`disabled`/`error` 都不代表抓取成功；`aes_hotkey_state.json` 只描述监听器本身。
 
 ## 版本绑定
 

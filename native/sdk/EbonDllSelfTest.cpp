@@ -50,6 +50,7 @@ int wmain(int argc,wchar_t** argv) {
     const bool delayed=std::wstring(argv[1])==L"delayed";
     const bool aes=std::wstring(argv[1])==L"aes";
     const bool aesError=std::wstring(argv[1])==L"aes_error";
+    const bool aesHotkey=std::wstring(argv[1])==L"aes_hotkey";
     const bool resources=std::wstring(argv[1])==L"resources";
     const auto dll=std::filesystem::absolute(argv[2]);
     const auto output=std::filesystem::absolute(argv[3]);
@@ -64,7 +65,11 @@ int wmain(int argc,wchar_t** argv) {
     GetModuleFileNameW(nullptr,self,32768);
     const auto module=std::filesystem::path(self).filename().u8string();
     const auto pak=aesError?dll.parent_path()/"fixture.pak":dll.parent_path()/"paks"/"fixture.pak";
-    ebon::save(profile,std::string("aes_hunt=")+(aes||aesError?"1":"0")+"\naes_timeout_seconds=5\naes_retry_ms=25\naes_pak="+
+    // aes_hotkey=1 leaves the scan disarmed until the hotkey request; every other
+    // mode keeps the immediate start so the reflection timing assertions hold.
+    ebon::save(profile,std::string("aes_hunt=")+(aes||aesError||aesHotkey?"1":"0")+
+               "\naes_hotkey="+(aesHotkey?"1":"0")+
+               "\naes_timeout_seconds=5\naes_retry_ms=25\naes_pak="+
                pak.u8string()+"\nmodule="+module+"\nclient_root="+(dll.parent_path()/"client").u8string()+"\n");
     ebon::save(dll.parent_path()/"EbonDumper.ini",
                "auto_dump=1\nconsole=0\nsettle_seconds=0\nmax_wait_seconds=2\nprofile="+profile.u8string()+
@@ -75,8 +80,13 @@ int wmain(int argc,wchar_t** argv) {
     bool sawProgress=false;
     ULONGLONG firstProgress=0;
     bool independentAes=false;
+    bool hotkeyRequested=false,hotkeyStarted=false;
     unsigned resourceRequests=0;
     while(GetTickCount64()-start<10000){
+        // The request file is the terminal-free equivalent of the F9 press.
+        if(aesHotkey&&!hotkeyRequested&&std::filesystem::is_directory(output)){
+            ebon::save(output/"aes_hunt.request","");hotkeyRequested=true;
+        }
         std::ifstream input(output/"dump_state.json",std::ios::binary);
         const std::string state((std::istreambuf_iterator<char>(input)),{});
         input.close();
@@ -101,12 +111,16 @@ int wmain(int argc,wchar_t** argv) {
                 if(resourceState.find("\"status\":\"no_resources\"")==resourceState.npos){Sleep(10);continue;}
                 if(resourceRequests==1){ebon::save(output/"resource_capture.request","");resourceRequests=2;Sleep(10);continue;}
             }
-            if(aes||aesError){
+            if(aes||aesError||aesHotkey){
                 std::ifstream aesFile(output/"aes"/"aes_state.json",std::ios::binary);
                 const std::string aesState((std::istreambuf_iterator<char>(aesFile)),{});
                 aesFile.close();
                 if(aesError){
                     if(aesState.find("\"status\":\"error\"")==aesState.npos){Sleep(10);continue;}
+                }else if(aesHotkey){
+                    // Nothing may start the scan except the hotkey listener itself.
+                    if(aesState.find("\"status\":\"timed_out\"")==aesState.npos){Sleep(10);continue;}
+                    hotkeyStarted=true;
                 }else{
                     if(aesState.find("\"status\":\"scanning\"")!=aesState.npos)independentAes=true;
                     if(aesState.find("\"status\":\"timed_out\"")==aesState.npos){Sleep(10);continue;}
@@ -119,6 +133,7 @@ int wmain(int argc,wchar_t** argv) {
             GetConsoleTitleW(currentTitle,1024);
             const bool ok=metadata.find("Health")!=metadata.npos&&state.find("\"objects\":6")!=state.npos&&
                           std::wstring(currentTitle)==consoleTitle;
+            if(aesHotkey&&!hotkeyStarted){std::cerr<<"AES hotkey request did not start the scan\n";return 8;}
             std::cout<<"DLL automatic discovery/collection: "<<(ok?"passed":"failed")<<" elapsed_ms="<<GetTickCount64()-start<<"\n";
             return ok?0:5;
         }
