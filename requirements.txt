@@ -3,3 +3,5 @@
 pycryptodome>=3.19
 # tools/verify_sdk_runtime.py 的 x64 指令特征核对
 capstone>=5.0
+# tools/verify_network_version_image.py 的只读 PE 布局核对
+pefile>=2024.8.26

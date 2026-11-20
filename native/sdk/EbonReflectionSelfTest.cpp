@@ -1,4 +1,5 @@
 #include "ebon_reflection.hpp"
+#include "ebon_network_version_selftest.hpp"
 #include <cassert>
 
 class Snapshot final:public ebon::MemoryReader {
@@ -241,9 +242,13 @@ public:
         if(!cached.get(pool+12,byteCursor)||byteCursor==12345)return 12;
         cached.reset();
         if(!cached.get(pool+12,byteCursor)||byteCursor!=12345)return 13;
-        std::cout<<"discovery regressions: noise filter, single discovery, batch overlap, deadline, failure state, snapshot cache passed\n";
+        if(!networkVersionSelfTest(*this))return 37;
+        std::cout<<"discovery regressions: noise filter, single discovery, batch overlap, deadline, failure state, snapshot cache and NetworkVersion evidence passed\n";
         return 0;
     }
 };
 
-int main(){auto out=std::filesystem::temp_directory_path()/"EbonReflectionSelfTest";std::error_code ec;std::filesystem::remove_all(out,ec);Snapshot s;int result=s.run(out);std::filesystem::remove_all(out,ec);std::cout<<"synthetic reflection test="<<result<<"\n";return result;}
+int main(int argc,char** argv){
+    if(argc==2&&std::strcmp(argv[1],"--network-version-selftest")==0){Snapshot s;return networkVersionSelfTest(s,&std::cout)?0:37;}
+    auto out=std::filesystem::temp_directory_path()/"EbonReflectionSelfTest";std::error_code ec;std::filesystem::remove_all(out,ec);Snapshot s;int result=s.run(out);std::filesystem::remove_all(out,ec);std::cout<<"synthetic reflection test="<<result<<"\n";return result;
+}

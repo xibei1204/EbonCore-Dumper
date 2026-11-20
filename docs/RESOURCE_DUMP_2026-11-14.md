@@ -51,7 +51,7 @@ profile 默认每容器最多 100,000 项、单字符串 65,536 个 UTF-16 码�
 
 修复版会对新反射清单做最多三次重试。若全局成功状态仍因瞬态对象变化为 false，但 NamePool/ObjectArray、属性布局以及最小对象/类型/属性数量都通过验证，就继续资源读取。读取过程继续校验每个对象当前索引、类与名字、容器头及位图；缺字段和对象变化记入 `unresolved.jsonl`。反射错误同步保存到 `reflection_attempts.json` 和嵌套反射快照状态，资源结果会标记 `complete_with_unresolved`。若基础布局或数量门槛不满足，则停止并写出每次尝试的错误，不使用不完整清单解码。
 
-候选修复构建位于 `build/candidate-focused-runtime-f10-32768-retry`，对前台校验的日志窗口例外正在单独加入，并会增加 PID 配对回归。既有热键边沿和反射重试已通过合成自测；新窗口校验尚待构建验证。已有登录/更新器快照不覆盖全部功能界面；应进入相关界面后补采，并以各次 `resource_state.json` 和 `unresolved.jsonl` 判断覆盖及缺项。
+修复热键日志窗口误判后的候选构建位于 `build/candidate-focused-runtime-f10-logfix`；随后合入 32,768 节点扫描限制、F10 日志窗口 PID 配对、短按边沿检测及瞬态资源反射容错的版本位于 `build/candidate-focused-runtime-f10-32768-retry`。完整原生构建、反射/DLL/AES/资源自测及相关网络、资源、DLL Python 测试通过。用户提供的前台 PID 日志已确定误判根因，但 PID 配对版仍需真实按键触发确认。已有登录/更新器快照不覆盖全部功能界面；应进入相关界面后补采，并以各次 `resource_state.json` 和 `unresolved.jsonl` 判断覆盖及缺项。
 
 ## 2026-11-15 实机结果复核
 
@@ -62,3 +62,7 @@ profile 默认每容器最多 100,000 项、单字符串 65,536 个 UTF-16 码�
 可用内容包括 400 行的 `DT_FT_PlayerModifyPackData`、18 行的 `DT_EquipmentModifyData`、13,987 行的 `DT_FT_Armor`，以及多张任务/对话表。`DT_FT_Armor` 有 195,818 个未解析值，部分对话表每行都有未解析字段。抽卡类命中 6 个资源，但都是 Default 对象；`HTLotteryManager.ModuleDefaultMap`、`NextLotteryCharacterIDS`、`SSRList` 和 `CumLotteryConfig.LotteryPoolIDs` 均为空，没有观察到当前活动卡池实例。
 
 未解析详情统计 229,000；`unresolved.jsonl` 只保存最多 1,000 条样例。已看到的常见限制包括不支持的 `Utf8StrProperty`、未知 Set/Map 对齐和未确认 FText 语义。`activities_systems/resources.jsonl` 有一处记录分隔损坏；已从权威 `resource_manifest.jsonl` 重建为 258 行，并把原件保存在同目录 `resources.jsonl.corrupt_original`。
+
+随后在 `out/reflection/network_layouts_20261115_004927/resources/res_1` 又采集到 343 个资源项（318 DataAsset、25 DataTable）、37,586 行和 62,274 条文本相关值。该次用了普通 180 秒预算，因资源读取 deadline 到期而标记失败；已写出的结构化文件与分类链接仍全部有效，资源文件总量约 396 MB。这次运行也命中了更多当前地图和角色对象。若要继续完整化，使用 `profiles/nte-ue5-resource-export.ini` 的 600 秒、500 万值、1,024 MiB 预算重新运行。
+
+按用户提示的 `F10 press observed, but foreground pid=23044 game pid=33272` 已确认：23044 是标题绑定 33272 的 EbonLogConsole 进程。游戏把 F10 输入事件发给当前前台窗口，因此只判断游戏 PID 会漏掉日志窗口前台时的短按。最新版改为允许游戏 PID 或这次启动创建并绑定的日志查看器 PID 前台触发，其他进程仍会忽略；此最终前台配对修复已通过合成关系测试，仍待一次真实 F10 按键触发确认。

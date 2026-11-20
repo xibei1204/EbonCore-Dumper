@@ -4,6 +4,7 @@ from pathlib import Path
 
 from .sdk_codegen import CodegenError, _cpp_string
 from .runtime_mapping import checked_runtime_mapping
+from .network_version import checked_network_version
 
 
 def _number(value):
@@ -120,6 +121,8 @@ def generate_network_files(source: Path, owners: list[dict], verified_owners=Non
     validated_reps={(r['owner'],r['property']) for t in tables if t['kind']=='class_reps' for r in t['entries']}
     for p in properties:p['rep_index_validated']=(p['owner'],p['property']) in validated_reps
     state=json.loads((source/'dump_state.json').read_text(encoding='utf-8'))
+    try:version=checked_network_version(source,(state.get('build') or {}).get('sha256'))
+    except ValueError as error:raise CodegenError('Invalid NetworkVersion evidence: '+str(error)) from error
     try:runtime=checked_runtime_mapping(source,owners,(state.get('build') or {}).get('sha256'),active)
     except (KeyError,TypeError,ValueError) as error:raise CodegenError('Invalid runtime mapping evidence: '+str(error)) from error
     rpc_index_map={}
@@ -158,17 +161,22 @@ def generate_network_files(source: Path, owners: list[dict], verified_owners=Non
                  packet_mapping_verified=False,
                  class_net_cache_candidates=len(candidates),
                  excluded_unstable_records=len(excluded),
-                 runtime_mapping_status=coverage)
+                  runtime_mapping_status=coverage,
+                  local_network_version=version['value'],network_version_verified=version['verified'],
+                  network_version_status=version['status'])
     normalized=dict(format='EbonNetwork-v1',summary=summary,rpcs=rpcs,properties=properties,
                     runtime_mapping_status=coverage,
                     class_tables=tables,active_network_objects=active,layout_offsets=layout_offsets,rejected_rep_notify=rejected_notify,runtime_cache_candidates=candidates,excluded_unstable_records=excluded,
-                    runtime_mappings=runtime,
+                    runtime_mappings=runtime,network_version=version,
                     limitations=['RPCId/RPCResponseId are UFunction service fields, not wire indices.',
                                  'FProperty RepIndex is distinct from FRepLayout handles and class-cache field indices.',
                                  'BlueprintReplicationCondition does not prove a native lifetime condition.',
                                  'Class NetFields positions are recorded in memory order and are not relabelled as wire indices.',
                                  'Runtime mappings cover only the captured caches, classes and command scopes; packet replay and Iris handles are not verified.'])
-    lines=['#pragma once','#include "Basic.hpp"','namespace SDK::Network {',
+    version_value=str(version['value'])+'U' if version['verified'] else 'std::nullopt'
+    lines=['#pragma once','#include "Basic.hpp"','#include <optional>','namespace SDK::Network {',
+           'inline constexpr std::optional<std::uint32_t> LocalNetworkVersion = '+version_value+';',
+           'inline constexpr bool NetworkVersionVerified = '+str(version['verified']).lower()+';',
            'enum class ERpcDirection { Unspecified, Server, Client, Multicast };',
            'struct FRpcInfo { std::string_view Path; std::uint32_t Flags; ERpcDirection Direction; bool Reliable; std::int32_t RpcId, RpcResponseId, FieldNetIndex; };',
            'struct FReplicatedPropertyInfo { std::string_view Owner, Name; std::uint64_t Flags; std::int32_t RepIndex, BlueprintCondition; std::string_view RepNotify; std::int32_t RepLayoutHandle; bool RepIndexValidated; };',

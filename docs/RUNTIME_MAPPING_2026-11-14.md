@@ -64,10 +64,30 @@ NetDriver 根来自本次捕获的活动网络对象。有限指针图只读扫�
 
 针对这次预算截断，扫描上限已提高到 8,192 个访问节点、32,768 个排队节点；单次总读内存仍不超过 16 MiB，扫描时限为 20 秒，每个明确根最多读取 64 KiB。新版在 `build/candidate-focused-runtime-8192`，未替换当前进程加载的 DLL。候选版通过完整 MSVC 构建、2,100 节点预算回归、反射自测、DLL 合成宿主、AES-NI、资源自测，以及 10 项网络映射/代码生成 Python 测试。仍需用新版本重启同哈希客户端并再次补采，才能知道增加预算是否找到目标布局。
 
-有效 `NetworkVersion` 仍未确认。镜像中的 `NetworkVersion.cpp` 文本是引擎源码路径；`ProtocolVersion` 属于 `FHTBalatroTransportChunk` 结构。IDA 字符串交叉引用没有给出可认定的网络版本数值。需要握手字节或确认版本计算函数及其输入，才能交付有效值。
+本段为早期未确认记录，已由 2026-11-15 的实机确认取代：UE `LocalNetworkVersion = 1039291632`（`0x3DF254F0`）。新探针从实际 `GetLocalNetworkVersion` 缓存取得值，保存 getter/Hello 指令与两次一致的缓存字节后离线重验。`NetworkVersion.cpp` 路径字符串与 `FHTBalatroTransportChunk.ProtocolVersion` 仍不是版本值证据。详见 [NetworkVersion 恢复记录](NETWORK_VERSION_2026-11-15.md)。
 
 ## 22:46 第二轮实机补采与后续候选版
 
 实机采集目录为 `out/reflection/focused_live_8192_20261114_224241/network_snapshot_1`。扫描根增加到 123，保存网络内存约 6.32 MB，仍触及 8,192 节点上限且 `budget_exhausted=true`；FClassNetCache 仍为 0。离线记录含 10 个完整布局，其中玩家武器新增 Adler 和 Haniel，目标玩家状态、角色、技能/属性组件、GameState、WorldDataLayers 布局仍未命中。包内原始 `rep_layouts` 有 17 项，离线交叉验证保留 10 项；SDK 只应使用离线重验结果。
 
 候选版已构建于 `build/candidate-focused-runtime-f10-32768`：访问节点上限 32,768、排队上限 65,536，仍受 20 秒/16 MiB 限制；预算自测使用 10,000 个根节点。资源导出热键、日志提示和文档已从 F11 切换为 F10。完整 MSVC 构建、原生反射/DLL/AES/资源自测及 11 项网络映射/资源 Python 测试通过。当前已构建但尚未实机验证；需用该候选版重启同哈希客户端才能验证新预算与 F10。
+
+## 01:01 同版本实机快照、SDK 与资源输出
+
+最新快照目录 `out/reflection/network_layouts_20261115_004927/network_snapshot_1` 的模块哈希与 profile 绑定值一致。`runtime_mapping.json` 离线重放确认 21 个完整 FRepLayout，其中包括：`BP_PlayerStateBase` 152 Parents / 343 Commands，`BP_GameStateBase` 36 / 119，`WorldDataLayers` 15 / 29，`HTAbilitySystemComponent` 37 / 108，`HTPlayerAttributeSet` 8 / 10，`HTContextualAnimSceneActorComponent` 22 / 91，以及 Haniel、Adler、046_male、Mint 玩家角色布局（各 83 / 143）。这些结构仍需包级读写/收发证据才能证明具体网络编码可用。
+
+该快照另有 3 个 FClassNetCache（HTPlayerController、Actor、HUD），FieldNetIndex 共 144 条；FRepLayout 共验证 1,522 个句柄。扫描有 123 根、14,974 节点、约 9.58 MiB 已读内存；在 20 秒期限耗尽，尚有 2,492 次读失败。`packet_mapping_verified=false`，Iris/包往返未验证。全局反射成功快照是父目录 `dump_state.json`（success=true、85,883 Objects、70,743 Types、183,170 Properties）；`network_snapshot_1/dump_state.json` 因场景异步对象变化有 12 项错误，因此 SDK 以成功父快照的声明为底，只合并离线交叉验证通过的网络记录。
+
+专用 SDK 已生成到 `out/sdk/CppSDK_FocusedLive_20261115`。Manifest 记录 21 个布局、1,522 个句柄、802 条 Parent 命令组，状态 `observed_partial`。`CompileCheck.cpp` 与 `Runtime.cpp` 已用 MSVC `/bigobj /std:c++17 /W4` 编译链接，`FocusedLiveCompileCheck.exe` 退出码 0。此编译检查是本地声明/链接验证，不是原游戏 ABI/网络闭环验收。
+
+同一父捕获下的资源结果在 `resources/res_1`：343 个资源项（318 DataAsset、25 DataTable）、37,586 行、62,274 文本相关值、1,637,703 个值。状态因为 180 秒 resource_timeout 耗尽而为 failed，分类均为 partial；结构化文件 701,000 条记录通过 JSON/JSONL 检查，472 个分类索引链接都指向存在且与根正文一致的独立副本。抽卡分类的 6 项仍全是 Default 对象，未观察到当前活动池实例。资源类别导出会复制正文，因此总输出约 396 MB。
+
+`F10` 的独立日志窗口前台误判已修正：热键可在游戏窗口或 PID 配对的 EbonLogConsole 窗口触发，其他窗口仍忽略。该专用构建位于 `build/candidate-focused-runtime-f10-logfix`，通过全量原生构建、合成反射/DLL/AES/资源自测及 20 项网络/代码生成/DLL测试；尚无该修复版本的实机 F10 记录。现在 profile `profiles/nte-ue5-resource-export.ini` 为资源采集提供 600 秒、5,000,000 值和 1,024 MiB 预算，可与 logfix 注入器配合后重启客户端使用。
+
+## 后续用户可见动作修复
+
+F10 日志 `F10 press observed, but foreground pid=23044 game pid=33272` 已通过进程窗口标题和类核对：23044 是标题 `EbonCore Dumper - game PID 33272` 的 `EbonLogConsole`，不是外部程序。游戏前台窗口实际接收键盘时，日志查看器若被点击置前，Windows 会把 F10 事件送给查看器进程，所以仅允许 HTGame PID 的门禁会拒绝有效按键。
+
+修复构建在 `build/candidate-focused-runtime-f10-logfix`：启动日志查看器时保留其 PID，热键前台检查接受 HTGame 或该配对查看器的 PID；任何其他前台 PID 仍拒绝。新增合成断言覆盖 game/log/other PID，完整 10 目标 MSVC 构建、反射/DLL/AES/资源原生自测以及 20 项 runtime-mapping/network-codegen/DLL Python 测试通过。真实热键需在关闭当前游戏后，用该候选版启动再验收。
+
+上次 `network_layouts_20261115_004927` 已捕获 PlayerState、GameState、WorldDataLayers、技能和角色 FRepLayout；对应 SDK 已编译并运行退出码 0。同一采集的资源导出在 180 秒默认限额处停止；使用 `profiles/nte-ue5-resource-export.ini`（600 秒、5,000,000 值、1,024 MiB）重跑可覆盖更多已加载资源。
