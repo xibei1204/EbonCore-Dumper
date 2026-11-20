@@ -27,7 +27,7 @@ class ResourceDumpTests(unittest.TestCase):
             state = json.loads((capture / "resource_state.json").read_text(encoding="utf-8"))
             self.assertTrue(state["success"])
             self.assertEqual(state["status"], "complete_with_unresolved")
-            rows = [json.loads(line) for line in (capture / "data" / "table_100.jsonl").read_text(encoding="utf-8").splitlines()][1:]
+            rows = [json.loads(line) for line in (capture / "data" / "DataTable" / "DT_CharacterFashion.jsonl").read_text(encoding="utf-8").splitlines()][1:]
             self.assertEqual([row["row"] for row in rows], ["CharacterA", "CharacterB"])
             self.assertEqual(rows[0]["values"]["Title"], "角色一")
             self.assertEqual(rows[0]["values"]["Scores"], [7, 9])
@@ -43,7 +43,7 @@ class ResourceDumpTests(unittest.TestCase):
                     self.assertEqual(body.read_bytes(), (capture / record["source_file"]).read_bytes())
                     body_bytes += body.stat().st_size
             counted_files = [capture / "resource_manifest.jsonl", capture / "unresolved.jsonl", capture / "references.jsonl",
-                             capture / "localization" / "text_values.jsonl", *list((capture / "data").glob("*.jsonl")),
+                             capture / "localization" / "text_values.jsonl", *list((capture / "data").rglob("*.jsonl")),
                              *list(capture.glob("*/resources.jsonl"))]
             self.assertEqual(state["bytes"], body_bytes + sum(file.stat().st_size for file in counted_files))
             self.assertEqual(state["category_payloads"], "separate_files")
@@ -56,19 +56,19 @@ class ResourceDumpTests(unittest.TestCase):
             self.assertTrue(corrupt["success"])
             self.assertEqual(corrupt["resources"], 1)
             scene = output / "scene"
-            component = json.loads((scene / "data" / "object_203.jsonl").read_text(encoding="utf-8"))
+            component = json.loads((scene / "data" / "Maps" / "MapFixture.PersistentLevel.PlacedNPC.SceneRoot.jsonl").read_text(encoding="utf-8"))
             self.assertEqual(component["values"]["RelativeLocation"], {"X": 1.25, "Y": -2.5, "Z": 3.75})
             self.assertTrue(component["outer"].endswith("PlacedNPC"))
-            self.assertTrue(json.loads((scene / "data" / "object_205.jsonl").read_text(encoding="utf-8"))["is_default"])
-            lua = json.loads((scene / "data" / "object_204.jsonl").read_text(encoding="utf-8"))
+            self.assertTrue(json.loads((scene / "data" / "Script" / "Engine.Default__PlacedNPC.jsonl").read_text(encoding="utf-8"))["is_default"])
+            lua = json.loads((scene / "data" / "Lua" / "LuaFixture.jsonl").read_text(encoding="utf-8"))
             self.assertEqual(lua["values"]["Source"], "return { map = '测试地图' }")
             references = [json.loads(line) for line in (scene / "references.jsonl").read_text(encoding="utf-8").splitlines()]
             self.assertTrue(any(ref["source"].endswith("RootComponent") and ref["target"].endswith("SceneRoot") for ref in references))
-            self.assertFalse((scene / "data" / "object_206.jsonl").exists())
-            manager = json.loads((scene / "data" / "object_207.jsonl").read_text(encoding="utf-8"))
+            self.assertFalse((scene / "data" / "Engine" / "Transient.EvalFixture.jsonl").exists())
+            manager = json.loads((scene / "data" / "Engine" / "Transient.QuestRuntime.jsonl").read_text(encoding="utf-8"))
             self.assertEqual(manager["kind"], "GameplayObject")
             self.assertEqual(manager["values"]["CurrentQuestId"], 5150)
-            self.assertFalse((output / "scene-focused" / "data" / "object_207.jsonl").exists())
+            self.assertFalse((output / "scene-focused" / "data" / "Engine" / "Transient.QuestRuntime.jsonl").exists())
 
 
 if __name__ == "__main__":

@@ -46,6 +46,35 @@ def _unresolved_count(value: dict) -> int:
     return count
 
 
+def _body_path(identity: str) -> str:
+    if not identity.startswith("/") or "\\" in identity:
+        raise ContainerError(f"invalid resource object path: {identity!r}")
+    package, *objects = identity[1:].split(".")
+    if "/" not in package or package.endswith("/") or any("/" in name for name in objects):
+        raise ContainerError(f"invalid resource object path: {identity!r}")
+    package_parts = package.split("/")
+    if package_parts[0] == "Game":
+        package_parts = package_parts[1:]
+    if not package_parts:
+        raise ContainerError(f"invalid resource object path: {identity!r}")
+    package = "/".join(package_parts)
+    for name in package_parts:
+        _relative_path(name)
+        if name.upper() in {"CONIN$", "CONOUT$", "COM\u00b9", "COM\u00b2", "COM\u00b3", "LPT\u00b9", "LPT\u00b2", "LPT\u00b3"}:
+            raise ContainerError(f"reserved device name in resource object path: {identity!r}")
+    # Keep nonmatching exports and subobjects distinct from their package asset.
+    package_name = package.rsplit("/", 1)[-1]
+    if objects and objects[0] == package_name:
+        objects = objects[1:]
+    safe_objects = []
+    for name in objects:
+        safe_name = name.replace(":", "%3A")
+        _relative_path(safe_name)
+        safe_objects.append(safe_name)
+    suffix = "".join("." + name for name in safe_objects)
+    return f"data/{package}{suffix}.jsonl"
+
+
 class ResourceBodyExporter:
     def __init__(self, capture: Path, output: Path, limits: BundleLimits | None = None):
         self.capture, self.output = capture.resolve(), output.resolve()
@@ -64,6 +93,7 @@ class ResourceBodyExporter:
         self.errors: list[dict] = []
         self.state_written = False
         self.category_counts = {name: 0 for name in CATEGORIES}
+        self.body_paths: dict[str, str] = {}
 
     def source_path(self, relative: str) -> Path:
         path = self.capture / _relative_path(relative)
@@ -155,11 +185,18 @@ class ResourceBodyExporter:
         required = len(data) * (len(groups) + 1)
         if self.payload_bytes + required > self.limits.max_total_mb * 1024 * 1024:
             raise ContainerError("resource body total byte budget exceeded")
-        canonical = "data/" + Path(relative).name
+        canonical = _body_path(header["object"])
+        key = canonical.casefold()
+        if key in self.body_paths:
+            raise ContainerError(f"resource output path collision: {self.body_paths[key]!r} and {header['object']!r}")
+        self.body_paths[key] = header["object"]
         destinations = [canonical, *(c + "/" + canonical for c in groups)]
         for destination in destinations:
             self.checkpoint()
-            _write_output(self.output / destination, data, overwrite=False)
+            path = self.output / destination
+            if path.resolve() != path:
+                raise ContainerError("linked resource output path is not written")
+            _write_output(path, data, overwrite=False)
             self.copies += 1
             self.payload_bytes += len(data)
         record = {**record, "file": canonical, "source_file": relative, "categories": groups,
@@ -188,7 +225,7 @@ class ResourceBodyExporter:
                   "partial_resources": self.partial_resources,
                   "payload_bytes": self.payload_bytes, "metadata_bytes": self.metadata_bytes,
                   "categories": self.category_counts, "errors": self.errors, "error": error,
-                  "file_paths": "relative_to_export_root", "category_payloads": "separate_files",
+                  "file_paths": "relative_to_export_root", "body_naming": "object_path", "category_payloads": "separate_files",
                   "limitations": ["Only existing payload bytes are exported; missing values are not reconstructed.",
                                   "Default objects and unresolved fields retain their original meaning.",
                                   "Unindexed bodies are partial resources, not proof of complete tables."]}
@@ -221,7 +258,7 @@ class ResourceBodyExporter:
                         seen.add(relative)
                         self.emit(record, relative)
                 # A timed-out table can contain valid rows but never reach index().
-                for path in sorted(self.source_path("data").glob("*.jsonl")):
+                for path in sorted(self.source_path("data").rglob("*.jsonl")):
                     relative = path.relative_to(self.capture).as_posix()
                     if relative not in seen:
                         self.emit(None, relative)

@@ -129,6 +129,65 @@ class Dumper {
         return 8;
     }
     static std::uint64_t align(std::uint64_t n,unsigned a){return (n+a-1)/a*a;}
+    std::filesystem::path bodyPath(const std::string& identity)const{
+        if(identity.empty()||identity.front()!='/'||identity.find('\\')!=std::string::npos)
+            throw std::runtime_error("invalid resource object path: "+identity);
+        const auto firstDot=identity.find('.');
+        const auto package=identity.substr(1,firstDot==std::string::npos?std::string::npos:firstDot-1);
+        if(package.empty()||package.front()=='/'||package.back()=='/'||package.find('/')==std::string::npos)
+            throw std::runtime_error("invalid resource package path: "+identity);
+        std::filesystem::path result="data";
+        const auto lastSlash=package.rfind('/');
+        const auto directory=package.substr(0,lastSlash);
+        const auto firstSlash=package.find('/');
+        std::size_t start=firstSlash!=std::string::npos&&package.substr(0,firstSlash)=="Game"?firstSlash+1:0;
+        const auto validateComponent=[&](const std::string& part){
+            if(part.empty()||part=="."||part==".."||part.back()=='.'||part.back()==' '||
+               part.find_first_of("\\/:*?\"<>|")!=std::string::npos)
+                throw std::runtime_error("unsafe resource path component: "+identity);
+            std::string stem=part.substr(0,part.find('.'));
+            for(auto& c:stem)if(c>='a'&&c<='z')c=static_cast<char>(c-'a'+'A');
+            bool reserved=stem=="CON"||stem=="PRN"||stem=="AUX"||stem=="NUL";
+            if(stem.size()==4&&(stem.rfind("COM",0)==0||stem.rfind("LPT",0)==0)&&stem[3]>='1'&&stem[3]<='9')
+                reserved=true;
+            if(reserved)throw std::runtime_error("reserved device name in resource path: "+identity);
+        };
+        while(start<directory.size()){
+            const auto slash=directory.find('/',start);
+            const auto part=directory.substr(start,slash==std::string::npos?std::string::npos:slash-start);
+            validateComponent(part);
+            result/=part;
+            if(slash==std::string::npos)break;
+            start=slash+1;
+        }
+        auto objectSuffix=firstDot==std::string::npos?std::string():identity.substr(firstDot+1);
+        const auto packageName=package.substr(package.rfind('/')+1);
+        if(objectSuffix==packageName)objectSuffix.clear();
+        else if(objectSuffix.rfind(packageName+".",0)==0)objectSuffix.erase(0,packageName.size()+1);
+        if(!objectSuffix.empty()){
+            std::size_t objectStart=0;
+            while(objectStart<objectSuffix.size()){
+                const auto dot=objectSuffix.find('.',objectStart);
+                auto part=objectSuffix.substr(objectStart,dot==std::string::npos?std::string::npos:dot-objectStart);
+                for(std::size_t colon=part.find(':');colon!=std::string::npos;colon=part.find(':',colon+3))
+                    part.replace(colon,1,"%3A");
+                validateComponent(part);
+                objectSuffix.replace(objectStart, dot==std::string::npos?objectSuffix.size()-objectStart:dot-objectStart,part);
+                if(dot==std::string::npos)break;
+                objectStart+=part.size()+1;
+            }
+        }
+        result/=packageName+(objectSuffix.empty()?std::string():"."+objectSuffix)+".jsonl";
+        return result;
+    }
+    std::string prepareBodyPath(const std::string& identity)const{
+        const auto relative=bodyPath(identity);
+        const auto destination=output_/relative;
+        std::filesystem::create_directories(destination.parent_path());
+        if(std::filesystem::exists(destination))
+            throw std::runtime_error("resource output path collision: "+relative.generic_string());
+        return relative.generic_string();
+    }
     Descriptor describe(std::uint64_t field){
         auto cached=descriptors_.find(field);if(cached!=descriptors_.end())return cached->second;
         Descriptor d;d.field=field;
@@ -397,7 +456,7 @@ class Dumper {
             }
             rows.emplace_back(name,data);
         }
-        const auto file="data/table_"+std::to_string(o.index)+".jsonl";
+        const auto file=prepareBodyPath(o.path);
         std::ofstream out(output_/file,std::ios::binary);if(!out)throw std::runtime_error("cannot open table output");
         const auto before=unresolved_;
         line(out,"{\"kind\":\"DataTable\",\"object\":"+quote(o.path)+",\"row_type\":"+quote(rowType.path)+",\"row_map_offset\":"+std::to_string(offset)+",\"layout\":\"validated_native_candidate\"}");
@@ -440,7 +499,7 @@ class Dumper {
             for(const auto& entry:c.entries){checkpoint();std::string s;if(!string(entry.second+off,s)){valid=false;break;}if(!s.empty())++nonempty;}
             if(valid&&nonempty)sourceOffsets.push_back(off);
         }
-        const auto file="data/text_"+std::to_string(o.index)+".jsonl";
+        const auto file=prepareBodyPath(o.path);
         std::ofstream out(output_/file,std::ios::binary);if(!out)throw std::runtime_error("cannot open text output");
         line(out,"{\"kind\":\"StringTable\",\"object\":"+quote(o.path)+",\"layout\":\"inferred_candidates\",\"map_offset\":"+std::to_string(c.offset)+",\"translations_verified\":false}");
         for(const auto& entry:c.entries){
@@ -479,7 +538,7 @@ class Dumper {
     }
     void objectValues(const Object& o,const Type& type,const std::string& kind){
         if(!current(o)){unavailable("stale resource object: "+o.path,o.address);return;}
-        const auto before=unresolved_;const auto file="data/object_"+std::to_string(o.index)+".jsonl";
+        const auto before=unresolved_;const auto file=prepareBodyPath(o.path);
         location_=o.path;
         std::uint64_t outer=0;reflection_.read(o.address,reflection_.layout().objOuter,outer);
         auto parent=objects_.find(outer);
@@ -507,7 +566,7 @@ class Dumper {
             ",\"build_sha256\":"+quote(reflection_.moduleSha256)+",\"resources\":"+std::to_string(resources_)+",\"rows\":"+std::to_string(rows_)+
             ",\"text_entries\":"+std::to_string(texts_)+",\"unresolved\":"+std::to_string(unresolved_)+",\"values\":"+std::to_string(values_)+
             ",\"bytes\":"+std::to_string(bytes_)+",\"categories\":"+categoriesJson+"},\"error\":"+(error.empty()?"null":quote(error))+
-            ",\"category_payloads\":\"separate_files\",\"file_paths\":\"relative_to_capture_root\",\"coverage\":\"loaded tables, assets, world/level/actor/component reflected values, game class defaults and text candidates; unloaded cells, cooked map reconstruction, script VM contents and complete translations are not established\"}\n");
+            ",\"category_payloads\":\"separate_files\",\"file_paths\":\"relative_to_capture_root\",\"body_naming\":\"object_path\",\"coverage\":\"loaded tables, assets, world/level/actor/component reflected values, game class defaults and text candidates; unloaded cells, cooked map reconstruction, script VM contents and complete translations are not established\"}\n");
     }
 public:
     Dumper(const MemoryReader& memory,Reflection& reflection,const Config& config,std::filesystem::path output)
@@ -581,7 +640,7 @@ public:
                     if(current(o))stringTable(o);else unavailable("stale StringTable: "+o.path,o.address);
                 }else if(isA(&type,"/Script/Engine.DataAsset")){
                     if(!current(o)){unavailable("stale DataAsset: "+o.path,o.address);continue;}
-                    const auto before=unresolved_;const auto file="data/asset_"+std::to_string(o.index)+".jsonl";
+                    const auto before=unresolved_;const auto file=prepareBodyPath(o.path);
                     location_=o.path;
                     std::ofstream out(output_/file,std::ios::binary);if(!out)throw std::runtime_error("cannot open asset output");
                     line(out,"{\"kind\":\"DataAsset\",\"object\":"+quote(o.path)+",\"class\":"+quote(type.path)+

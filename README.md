@@ -8,6 +8,7 @@ Windows x64 / Unreal Engine 5 的只读反射采集、C++ SDK 生成与资源导
 
 - 采集已加载 UObject、类型、属性、枚举、函数与 RPC / 复制元数据。
 - 生成 C++ 声明、继承、布局断言、布尔位访问器和网络查询接口。
+- 只读采集并逐字节重验 UE `LocalNetworkVersion`，SDK 用可选 UInt32 导出，未观测时保持 `nullopt`。
 - 用 F10 重复导出表行、资产配置、场景反射值及对象引用。
 - `resources.jsonl` **只作索引**；正文保存在各分类 `data/*.jsonl` 独立文件中。
 - 保全 loose / Pak / IoStore 资源，保留来源路径、状态与 SHA-256。
@@ -48,6 +49,8 @@ python tools/ebon_cli.py generate-sdk `
 
 只有成功且通过布局校验的快照可用于生成 SDK。注入器的加载成功提示不能代替 `dump_state.json` 的采集状态。
 
+需要同时确认 UE 握手版本时，给 `inject-and-dump` 加 `--wait-network-version`；也可对已有本次快照执行 `verify-network-version --capture <目录>`。具体版本绑定、代码与缓存证据见 [NetworkVersion 说明](docs/NETWORK_VERSION_2026-11-15.md)。
+
 ### 资源正文
 
 等待日志显示 `F10 resource dump ready`，在目标游戏或对应 EbonCore 日志窗口前台按 F10；也可通过 `tools/request_resource_capture.ps1` 请求采集。
@@ -56,13 +59,13 @@ python tools/ebon_cli.py generate-sdk `
 out/reflection/your_capture/resources/res_1/
 ├─ resource_state.json
 ├─ resource_manifest.jsonl
-├─ data/asset_123.jsonl
+├─ data/DataTable/Avatar/AvatarDataTable.jsonl
 └─ gacha/
    ├─ resources.jsonl           # 索引，不包含正文
-   └─ data/asset_123.jsonl      # 独立正文
+   └─ data/DataTable/Avatar/AvatarDataTable.jsonl      # 独立正文，按对象路径命名
 ```
 
-索引 `file` 相对于 `res_1` 根目录。已有 dump 可在不覆盖原件的情况下重新整理正文：
+正文按对象路径命名，`/Game/` 映射为 `data/` 下的内容路径；其他包保留 `/Script/`、`/Engine/` 等根名。子对象追加完整 outer 名称以避免冲突。索引 `file` 相对于 `res_1` 根目录。旧编号 dump 可在不覆盖原件的情况下重导为原名路径：
 
 ```powershell
 python tools/ebon_cli.py export-resource-bodies `

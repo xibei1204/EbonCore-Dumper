@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from tools.ebon.containers import ContainerError
-from tools.ebon.resource_bodies import ResourceBodyExporter, export_resource_bodies
+from tools.ebon.resource_bodies import ResourceBodyExporter, _body_path, export_resource_bodies
 from tools.ebon.resource_bundle import BundleLimits
 from tools.ebon_cli import main
 
@@ -17,6 +17,35 @@ def rows(path):
 
 
 class ResourceBodyTests(unittest.TestCase):
+    def test_body_paths_follow_unreal_object_paths(self):
+        self.assertEqual(_body_path("/Game/DataTable/Avarta/AvatarDataTable.AvatarDataTable"),
+                         "data/DataTable/Avarta/AvatarDataTable.jsonl")
+        self.assertEqual(_body_path("/Game/Maps/Map.Map.PersistentLevel.Actor"),
+                         "data/Maps/Map.PersistentLevel.Actor.jsonl")
+        self.assertEqual(_body_path("/Game/DataAsset.DataAsset:Subobject"),
+                         "data/DataAsset.DataAsset%3ASubobject.jsonl")
+        for identity in ("/Game/../escape.Asset", "/Game/Data/CON.CON"):
+            with self.subTest(identity=identity), self.assertRaises(ContainerError):
+                _body_path(identity)
+
+    def test_case_insensitive_object_path_collision_fails_without_overwrite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); capture = self.fixture(root)
+            first = rows(capture / "resource_manifest.jsonl")[0]
+            first_body = json.loads((capture / first["file"]).read_text(encoding="utf-8"))
+            second_body = {**first_body, "object": "/Script/HTGame.default__htlotterymanager"}
+            second_file = "data/asset_2.jsonl"
+            (capture / second_file).write_text(json.dumps(second_body), encoding="utf-8")
+            second = {**first, "object": second_body["object"], "file": second_file}
+            (capture / "resource_manifest.jsonl").write_text(
+                json.dumps(first) + "\n" + json.dumps(second) + "\n", encoding="utf-8")
+            output = root / "out"
+            state = export_resource_bodies(capture, output)
+            self.assertFalse(state["success"])
+            self.assertIn("resource output path collision", state["error"])
+            original = output / "data/Script/HTGame.Default__HTLotteryManager.jsonl"
+            self.assertEqual(original.read_bytes(), (capture / first["file"]).read_bytes())
+
     def fixture(self, root, *, success=True, orphan=False):
         capture = root / "res_1"
         (capture / "data").mkdir(parents=True)
@@ -49,14 +78,14 @@ class ResourceBodyTests(unittest.TestCase):
             for category in ("gacha", "characters"):
                 record = rows(output / category / "resources.jsonl")[0]
                 self.assertNotIn("values", record)
-                self.assertEqual(record["file"], category + "/data/asset_1.jsonl")
+                self.assertEqual(record["file"], category + "/data/Script/HTGame.Default__HTLotteryManager.jsonl")
                 payload = (output / record["file"]).read_bytes()
                 self.assertEqual(payload, before[Path("data/asset_1.jsonl")])
                 self.assertEqual(record["sha256"], hashlib.sha256(payload).hexdigest())
                 self.assertEqual(record["bytes"], len(payload))
                 self.assertEqual(json.loads(payload)["values"]["Title"], "活动卡池")
-            (output / "gacha" / "data" / "asset_1.jsonl").write_bytes(b"edited copy")
-            self.assertEqual((output / "characters" / "data" / "asset_1.jsonl").read_bytes(), before[Path("data/asset_1.jsonl")])
+            (output / "gacha" / "data" / "Script" / "HTGame.Default__HTLotteryManager.jsonl").write_bytes(b"edited copy")
+            self.assertEqual((output / "characters" / "data" / "Script" / "HTGame.Default__HTLotteryManager.jsonl").read_bytes(), before[Path("data/asset_1.jsonl")])
             self.assertEqual(before, {p.relative_to(capture): p.read_bytes() for p in capture.rglob("*") if p.is_file()})
 
     def test_failed_capture_recovers_unindexed_valid_rows_as_explicitly_partial(self):

@@ -260,7 +260,7 @@ int run(const std::filesystem::path& output) {
     const auto state=contents(output/"complete"/"resource_state.json");
     require(state.find("\"success\":true")!=state.npos&&state.find("\"rows\":2")!=state.npos&&
             state.find("\"resources\":2")!=state.npos,"resource counts or success were incorrect");
-    const auto table=contents(output/"complete"/"data"/"table_100.jsonl");
+    const auto table=contents(output/"complete"/"data"/"DataTable"/"DT_CharacterFashion.jsonl");
     for(const auto* expected:{"\"row\":\"CharacterA\"","\"row\":\"CharacterB\"","\"HitPoints\":123",
                              "\"HitPoints\":456","\"Title\":\"角色一\"","\"Enabled\":true","\"Enabled\":false",
                              "\"Scores\":[7,9]","\"Nested\":{\"Rank\":5,\"Ready\":true}",
@@ -268,28 +268,28 @@ int run(const std::filesystem::path& output) {
                              "FText native layout unverified","candidate only"})
         require(table.find(expected)!=table.npos,"actual table value was missing or incorrect");
     require(table.find("invalid FName")==table.npos,"a free sparse slot was serialized as a row");
-    const auto asset=contents(output/"complete"/"data"/"asset_101.jsonl");
+    const auto asset=contents(output/"complete"/"data"/"Engine"/"Transient.GameInstance.HTLotteryManager.LotteryRuntime.jsonl");
     require(asset.find("/Engine/Transient.")!=asset.npos&&asset.find("\"PoolGuaranteeCount\":90")!=asset.npos&&
             asset.find("\"is_default\":false")!=asset.npos,"transient DataAsset values were missing");
     require(asset.find("\"InheritedSetting\":314")!=asset.npos,"empty intermediate class lost ancestor values");
     for(const auto& category:ebon::resources::categoryNames())
         require(std::filesystem::exists(output/"complete"/category/"resources.jsonl"),"category index directory is missing");
-    require(contents(output/"complete"/"characters"/"resources.jsonl").find("table_100.jsonl")!=std::string::npos,"character table routing failed");
-    require(contents(output/"complete"/"gacha"/"resources.jsonl").find("asset_101.jsonl")!=std::string::npos,"transient lottery routing failed");
-    require(contents(output/"complete"/"character_skins"/"resources.jsonl").find("table_100.jsonl")!=std::string::npos,"fashion table routing failed");
-    require(contents(output/"complete"/"characters"/"data"/"table_100.jsonl")==table,"category table body differs from canonical values");
-    require(contents(output/"complete"/"character_skins"/"data"/"table_100.jsonl")==table,"second category table body was missing");
-    require(contents(output/"complete"/"gacha"/"data"/"asset_101.jsonl")==asset,"category asset body was missing");
+    require(contents(output/"complete"/"characters"/"resources.jsonl").find("DataTable/DT_CharacterFashion.jsonl")!=std::string::npos,"character table routing failed");
+    require(contents(output/"complete"/"gacha"/"resources.jsonl").find("Engine/Transient.GameInstance.HTLotteryManager.LotteryRuntime.jsonl")!=std::string::npos,"transient lottery routing failed");
+    require(contents(output/"complete"/"character_skins"/"resources.jsonl").find("DataTable/DT_CharacterFashion.jsonl")!=std::string::npos,"fashion table routing failed");
+    require(contents(output/"complete"/"characters"/"data"/"DataTable"/"DT_CharacterFashion.jsonl")==table,"category table body differs from canonical values");
+    require(contents(output/"complete"/"character_skins"/"data"/"DataTable"/"DT_CharacterFashion.jsonl")==table,"second category table body was missing");
+    require(contents(output/"complete"/"gacha"/"data"/"Engine"/"Transient.GameInstance.HTLotteryManager.LotteryRuntime.jsonl")==asset,"category asset body was missing");
     const auto gachaIndex=contents(output/"complete"/"gacha"/"resources.jsonl");
-    require(gachaIndex.find("\"file\":\"gacha/data/asset_101.jsonl\"")!=gachaIndex.npos&&
+    require(gachaIndex.find("\"file\":\"gacha/data/Engine/Transient.GameInstance.HTLotteryManager.LotteryRuntime.jsonl\"")!=gachaIndex.npos&&
             gachaIndex.find("\"values\"")==gachaIndex.npos,"category index embeds values or points to the wrong body");
     {
         const auto conflict=output/"body-conflict";
-        std::filesystem::create_directories(conflict/"characters"/"data");
-        ebon::save(conflict/"characters"/"data"/"table_100.jsonl","{\"keep\":\"existing body\"}\n");
+        std::filesystem::create_directories(conflict/"characters"/"data"/"DataTable");
+        ebon::save(conflict/"characters"/"data"/"DataTable"/"DT_CharacterFashion.jsonl","{\"keep\":\"existing body\"}\n");
         ebon::resources::Dumper dumper(memory,reflection,config,conflict);
         require(!dumper.run(),"existing category body was overwritten");
-        require(contents(conflict/"characters"/"data"/"table_100.jsonl")=="{\"keep\":\"existing body\"}\n","body conflict changed existing bytes");
+        require(contents(conflict/"characters"/"data"/"DataTable"/"DT_CharacterFashion.jsonl")=="{\"keep\":\"existing body\"}\n","body conflict changed existing bytes");
     }
     const auto textValues=contents(output/"complete"/"localization"/"text_values.jsonl");
     require(textValues.find("角色一")!=textValues.npos&&textValues.find("活动时装")!=textValues.npos&&
@@ -328,39 +328,39 @@ int run(const std::filesystem::path& output) {
         ebon::resources::Dumper dumper(memory,reflection,config,output/"corrupt");
         require(dumper.run(),"a bad table prevented the independent valid asset capture");
     }
-    require(!std::filesystem::exists(output/"corrupt"/"data"/"table_100.jsonl"),"corrupt row map produced a table file");
+    require(!std::filesystem::exists(output/"corrupt"/"data"/"DataTable"/"DT_CharacterFashion.jsonl"),"corrupt row map produced a table file");
     require(contents(output/"corrupt"/"unresolved.jsonl").find("RowMap layout not verified")!=std::string::npos,"corrupt table diagnostics were missing");
     memory.stringResource(reflection);
     {
         ebon::resources::Dumper dumper(memory,reflection,config,output/"text-candidates");
         require(dumper.run(),"validated StringTable candidate fixture failed");
     }
-    const auto text=contents(output/"text-candidates"/"data"/"text_102.jsonl");
+    const auto text=contents(output/"text-candidates"/"data"/"Text"/"ST_Character.jsonl");
     require(text.find("\"translations_verified\":false")!=text.npos&&text.find("inferred_candidates")!=text.npos&&
             text.find("\"key\":\"CharacterA.Name\"")!=text.npos&&text.find("角色名称")!=text.npos&&
             text.find("角色说明")!=text.npos,"StringTable candidates were missing or claimed verified translations");
     require(contents(output/"text-candidates"/"resource_state.json").find("\"text_entries\":2")!=std::string::npos,"StringTable sparse holes produced incorrect entry counts");
-    require(contents(output/"text-candidates"/"localization"/"data"/"text_102.jsonl")==text,"StringTable body was not published separately");
+    require(contents(output/"text-candidates"/"localization"/"data"/"Text"/"ST_Character.jsonl")==text,"StringTable body was not published separately");
     memory.sceneResources(reflection);
     {
         ebon::resources::Dumper dumper(memory,reflection,config,output/"scene");
         require(dumper.run(),"scene and script objects were excluded from resources");
     }
     require(contents(output/"scene"/"resource_state.json").find("\"resources\":7")!=std::string::npos,"scene resource count was incorrect");
-    require(contents(output/"scene"/"data"/"object_203.jsonl").find("\"RelativeLocation\":{\"X\":1.25,\"Y\":-2.5,\"Z\":3.75}")!=std::string::npos,"reflected scene coordinates were missing");
-    require(contents(output/"scene"/"data"/"object_205.jsonl").find("\"is_default\":true")!=std::string::npos,"scene CDO lost its default marker");
+    require(contents(output/"scene"/"data"/"Maps"/"MapFixture.PersistentLevel.PlacedNPC.SceneRoot.jsonl").find("\"RelativeLocation\":{\"X\":1.25,\"Y\":-2.5,\"Z\":3.75}")!=std::string::npos,"reflected scene coordinates were missing");
+    require(contents(output/"scene"/"data"/"Script"/"Engine.Default__PlacedNPC.jsonl").find("\"is_default\":true")!=std::string::npos,"scene CDO lost its default marker");
     require(contents(output/"scene"/"references.jsonl").find("RootComponent")!=std::string::npos,"scene object reference edges were missing");
-    require(contents(output/"scene"/"scripts"/"resources.jsonl").find("object_204.jsonl")!=std::string::npos,"Lua asset was not routed to scripts");
-    require(contents(output/"scene"/"scripts"/"data"/"object_204.jsonl")==contents(output/"scene"/"data"/"object_204.jsonl"),"script body differs from original values");
-    require(contents(output/"scene"/"maps"/"data"/"object_203.jsonl")==contents(output/"scene"/"data"/"object_203.jsonl"),"scene body was not published separately");
-    require(!std::filesystem::exists(output/"scene"/"data"/"object_206.jsonl"),"Evaluation class was incorrectly selected as Lua");
-    require(contents(output/"scene"/"data"/"object_207.jsonl").find("\"CurrentQuestId\":5150")!=std::string::npos,"non-DataAsset gameplay manager was excluded");
+    require(contents(output/"scene"/"scripts"/"resources.jsonl").find("Lua/LuaFixture.jsonl")!=std::string::npos,"Lua asset was not routed to scripts");
+    require(contents(output/"scene"/"scripts"/"data"/"Lua"/"LuaFixture.jsonl")==contents(output/"scene"/"data"/"Lua"/"LuaFixture.jsonl"),"script body differs from original values");
+    require(contents(output/"scene"/"maps"/"data"/"Maps"/"MapFixture.PersistentLevel.PlacedNPC.SceneRoot.jsonl")==contents(output/"scene"/"data"/"Maps"/"MapFixture.PersistentLevel.PlacedNPC.SceneRoot.jsonl"),"scene body was not published separately");
+    require(!std::filesystem::exists(output/"scene"/"data"/"Engine"/"Transient.EvalFixture.jsonl"),"Evaluation class was incorrectly selected as Lua");
+    require(contents(output/"scene"/"data"/"Engine"/"Transient.QuestRuntime.jsonl").find("\"CurrentQuestId\":5150")!=std::string::npos,"non-DataAsset gameplay manager was excluded");
     {
         auto focused=config;focused.values["resource_game_objects"]="0";
         ebon::resources::Dumper dumper(memory,reflection,focused,output/"scene-focused");
         require(dumper.run(),"disabling gameplay objects prevented scene capture");
     }
-    require(!std::filesystem::exists(output/"scene-focused"/"data"/"object_207.jsonl"),"gameplay instance switch was ignored");
+    require(!std::filesystem::exists(output/"scene-focused"/"data"/"Engine"/"Transient.QuestRuntime.jsonl"),"gameplay instance switch was ignored");
     {
         const auto reserved=output/"reserved-state";
         std::filesystem::create_directories(reserved);

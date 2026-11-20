@@ -120,7 +120,7 @@ python tools/ebon_cli.py inject-and-dump `
 python -m tools.ebon.network_coverage --capture "$Capture/network_snapshot_1" --out out/reports/<新目录>
 ```
 
-报告逐表核对 Parents/Cmds 的实际与声明数量，并列出目标继承链中各个 Owner 类的状态。有效 UE `NetworkVersion` 仍待确认；`FHTBalatroTransportChunk.ProtocolVersion` 不能代替连接握手版本。
+报告逐表核对 Parents/Cmds 的实际与声明数量，并列出目标继承链中各个 Owner 类的状态。同哈希客户端的 UE `LocalNetworkVersion` 已于 2026-11-15 实机确认：`1039291632`（`0x3DF254F0`）；新采集器保存 getter/Hello/缓存字节并在 SDK 生成时重验。`FHTBalatroTransportChunk.ProtocolVersion` 仍不能代替连接握手版本。见 [版本确认与使用](NETWORK_VERSION_2026-11-15.md)。
 
 SDK 目录主要内容：`SDK.hpp`、`Types.hpp`、`Enums.hpp`、`Basic.hpp`、`Forward.hpp`、`Parameters.hpp`、`Functions.hpp`、`Network.hpp`、`Runtime.cpp`、`Packages/*.hpp`、`type_map.json`、`CompileCheck.cpp` 与 `CMakeLists.txt`，未确认项记录在 `unresolved.json`，覆盖范围见 `sdk_manifest.json`。
 
@@ -143,7 +143,24 @@ python tools/ebon_cli.py wait-aes --capture out/reflection/<本次目录> --seco
 
 ### 6. F10 导出资源配置值
 
-使用新构建的 `build/EbonDumper.dll` 启动注入流程，等待日志出现 **`F10 resource dump ready`**。游戏窗口或本次游戏对应的 EbonCore 日志窗口在前台时按 **F10**，每次生成：
+快捷键误判修复版位于 `build/candidate-focused-runtime-f10-logfix`。它会接受游戏窗口或 PID 配对的 EbonCore 日志窗口为前台，并读取按键事件边沿。为了在大场景导出更多值，先用独立资源预算 profile 启动注入器（必须在启动游戏前运行命令）：
+
+```powershell
+$Capture = Join-Path (Get-Location) ("out\reflection\resource_f10_" + (Get-Date -Format "yyyyMMdd_HHmmss"))
+python tools\ebon_cli.py inject-and-dump `
+  --injector build/candidate-focused-runtime-f10-logfix/EbonDebugInject.exe `
+  --dumper build/candidate-focused-runtime-f10-logfix/EbonDumper.dll `
+  --profile profiles/nte-ue5-resource-export.ini --dump-out $Capture `
+  --log out/ebon_inject_f10.log --seconds 900 --no-sdk
+```
+
+等待日志显示 **`F10 resource dump ready`**。游戏窗口或该进程对应的 EbonCore 日志窗口前台时按 **F10**。若想用文件请求，另一个 PowerShell 窗口运行：
+
+```powershell
+.\tools\request_resource_capture.ps1 -Capture $Capture
+```
+
+每次生成：
 
 ```text
 out/reflection/<本次采集>/resources/res_N/
@@ -168,7 +185,7 @@ out/reflection/<本次采集>/resources/res_N/
 └─ unresolved.jsonl           # 未解析字段与失败原因（最多记录前 1,000 项详情）
 ```
 
-每个分类下的 `resources.jsonl` **仅保存索引，不嵌入正文**；正文是该分类 `data/` 下的独立 JSONL 文件。例如 `gacha/resources.jsonl` 的 `file="gacha/data/asset_75973.jsonl"` 指向抽卡分类正文，路径相对于 `res_N` 根目录。根目录 `data/` 仍保留原始正文，分类副本不重新读取游戏内存，也不共享可修改的硬链接。旧版本索引仍指向根目录 `data/`。分类依据对象、类型及字段命名，允许一个资源属于多个分类。配置对象同时包含默认值（`is_default=true`）和当前实例，包括 `/Engine/Transient` 下的抽卡管理器。独立副本计入 `resource_max_output_mb` 输出预算。
+每个分类下的 `resources.jsonl` **仅保存索引，不嵌入正文**；正文是该分类 `data/` 下的独立 JSONL 文件。例如 `gacha/resources.jsonl` 的 `file="gacha/data/DataTable/Avatar/AvatarDataTable.jsonl"` 指向按 Unreal 对象路径命名的正文，路径相对于 `res_N` 根目录。`/Game/` 映射到 `data/` 内容根，`/Engine/`、`/Script/` 等包保留各自根目录；子对象名附加 outer 路径，避免相互覆盖。根目录正文和分类副本独立写入，不共享可修改的硬链接。旧编号 dump 可用 `export-resource-bodies` 重导；分类依据对象、类型及字段命名，允许一个资源属于多个分类。配置对象同时包含默认值（`is_default=true`）和当前实例，包括 `/Engine/Transient` 下的抽卡管理器。独立副本计入 `resource_max_output_mb` 输出预算。
 
 已有 dump 可在不修改原件的情况下生成分类正文文件：
 
