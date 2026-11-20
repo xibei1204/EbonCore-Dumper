@@ -95,7 +95,9 @@ static void captureResources(const ebon::Config& config,const ebon::Module& modu
             "{\"format\":\"EbonResources-v1\",\"status\":\"discovering\",\"success\":false}\n");
         ebon::InProcessReader memory;
         auto resourceConfig=config;
-        resourceConfig.values["collect_network"]="0";
+        // Capture the menu component cache in the same fresh inventory as its
+        // instance and tables. This also avoids pairing different sessions.
+        resourceConfig.values["collect_network"]=config.number("resource_capture_network",1)?"1":"0";
         const auto timeout=config.number("resource_timeout_seconds",180);
         if(timeout<1||timeout>1800)throw std::runtime_error("resource_timeout_seconds must be in 1..1800");
         ebon::console::logf("info","F10 resource capture started: %s",output.u8string().c_str());
@@ -160,6 +162,8 @@ static void captureResources(const ebon::Config& config,const ebon::Module& modu
         const bool ok=dumper.run(true);
         ebon::console::logf(ok?"success":"warn","F10 resource capture finished: success=%d state=%s",
             ok?1:0,(output/"resource_state.json").u8string().c_str());
+        ebon::console::logf("info","F10 resource bodies: %s",
+            std::filesystem::absolute(output/"data").lexically_normal().u8string().c_str());
     } catch(const std::exception& e) {
         ebon::console::logf("error","F10 resource capture failed: %s",e.what());
         if(outputOwned)try {ebon::save(output/"resource_state.json","{\"format\":\"EbonResources-v1\",\"status\":\"failed\",\"success\":false,\"error\":"+ebon::quote(e.what())+"}\n");}catch(...){}

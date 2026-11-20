@@ -127,7 +127,7 @@ def generate_network_files(source: Path, owners: list[dict], verified_owners=Non
     except (KeyError,TypeError,ValueError) as error:raise CodegenError('Invalid runtime mapping evidence: '+str(error)) from error
     rpc_index_map={}
     for row in runtime['field_indices']:
-        if row['rpc']:rpc_index_map.setdefault(row['path'],set()).add(row['field_net_index'])
+        if row['rpc'] and not row.get('incompatible'):rpc_index_map.setdefault(row['path'],set()).add(row['field_net_index'])
     for rpc in rpcs:
         values=rpc_index_map.get(rpc['path'],set())
         if len(values)==1:rpc['field_net_index']=next(iter(values))

@@ -68,11 +68,13 @@ class RuntimeReplay:
             index=m.i32(address+16);serial=m.i32(address+20)
             cls=self.class_indices[index]['path']
             if cls not in self.classes or not 0<serial<0x40000000 or not 0<=base<1000000:return None
-            data,n=m.array(address+32)
+            data,n,capacity=struct.unpack_from('<Qii',header,32)
+            if not 0<=n<=8192 or not n<=capacity<=65536 or (n and (data<65536 or data&7)) or base+n>1000000:return None
+            parent=None
             if super_:
                 parent=self.class_indices[m.i32(super_+16)]['path']
                 if self.classes[cls].get('super')!=parent or m.i32(super_)+m.i32(super_+40)!=base:return None
-            elif base!=0:return None
+            elif base!=0 or (not n and self.classes[cls].get('super')):return None
             for stride in (24,16):
                 rows=[]
                 try:
@@ -84,7 +86,9 @@ class RuntimeReplay:
                                          record_address=hex(at),record_bytes=raw.hex()))
                     if len(rows)==n:return dict(kind='class_net_cache',class_=cls,address=hex(address),header_bytes=header.hex(),
                                                weak_class_index=index,weak_class_serial=serial,super_address=hex(super_),fields_base=base,
-                                               field_stride=stride,class_checksum=m.u32(address+24),entries=rows,validation='runtime_cross_checked')
+                                               super_class=parent,field_count=n,field_index_start=base,field_index_end_exclusive=base+n,
+                                               field_index_end_inclusive=base+n-1 if n else None,
+                                               field_stride=stride if n else 24,class_checksum=m.u32(address+24),entries=rows,validation='runtime_cross_checked')
                 except (KeyError,ValueError,struct.error):continue
         except (KeyError,ValueError,struct.error):pass
         return None
@@ -151,7 +155,8 @@ class RuntimeReplay:
                     else:index=m.i32(address+pos+16);serial=m.i32(address+pos+20)
                     if index in self.class_indices and 0<serial<0x40000000:
                         cache=self.cache(address+pos)
-                        if cache:cache['class']=cache.pop('class_');caches[address+pos]=cache
+                        if cache and cache['entries']:
+                            cache['class']=cache.pop('class_');caches[address+pos]=cache
                 except KeyError:pass
                 try:pointer=struct.unpack_from('<Q',block,pos)[0] if pos+8<=size else m.u64(address+pos)
                 except KeyError:continue
@@ -164,6 +169,17 @@ class RuntimeReplay:
                     ptr,n=m.array(address+pos);cmds,nc=m.array(address+pos+16)
                     if m.u64(ptr)&~1 in self.fields:array_candidates.append(address+pos)
                 except (KeyError,ValueError,struct.error):pass
+        # Empty cache headers are meaningful only when reached from an
+        # observed child, not as unrelated zero-filled memory patterns.
+        for child in list(caches.values()):
+            parent=int(child['super_address'],0);seen=set()
+            while parent and parent not in seen and len(seen)<64:
+                seen.add(parent)
+                if parent in caches:break
+                cache=self.cache(parent)
+                if not cache:break
+                cache['class']=cache.pop('class_');caches[parent]=cache
+                parent=int(cache['super_address'],0)
         owner_positions.sort();positions=[p[0] for p in owner_positions]
         for header in set(array_candidates):
             begin=bisect_right(positions,header-256);end=bisect_right(positions,header+512)

@@ -72,7 +72,13 @@ def _body_path(identity: str) -> str:
         _relative_path(safe_name)
         safe_objects.append(safe_name)
     suffix = "".join("." + name for name in safe_objects)
-    return f"data/{package}{suffix}.jsonl"
+    result = f"data/{package}{suffix}.jsonl"
+    if len(result.encode("utf-16-le")) // 2 > 180:
+        digest = 14695981039346656037
+        for byte in identity.encode("utf-8"):
+            digest = ((digest ^ byte) * 1099511628211) & 0xffffffffffffffff
+        return f"data/_long/object_{digest:016x}.jsonl"
+    return result
 
 
 class ResourceBodyExporter:

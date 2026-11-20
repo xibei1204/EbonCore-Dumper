@@ -4,12 +4,22 @@
 namespace ebon {
 struct NetworkRuntimeClass {std::uint64_t address=0;std::int32_t index=-1;std::string path,super;};
 struct NetworkRuntimeField {std::uint64_t address=0;std::string path,owner;std::int32_t offset=0;bool rpc=false;std::int32_t elementSize=1,arrayDim=1;};
+struct NetworkRuntimeCacheEntry {std::string path;std::int32_t fieldNetIndex=-1;std::uint32_t checksum=0;bool incompatible=false;};
+struct NetworkRuntimeCacheRecord {
+    std::string classPath,superClassPath,json;
+    std::uint64_t address=0,superAddress=0;
+    std::int32_t fieldsBase=0,fieldCount=0,fieldIndexEndExclusive=0;
+    unsigned fieldStride=0;
+    std::uint32_t classChecksum=0;
+    std::vector<NetworkRuntimeCacheEntry> entries;
+};
 struct NetworkLayoutStorage {
     std::uint64_t parents=0,commands=0;
     unsigned parentCount=0,commandCount=0,parentStride=0,commandStride=0;
 };
 struct NetworkRuntimeResult {
     std::vector<std::string> caches,layouts;
+    std::vector<NetworkRuntimeCacheRecord> cacheRecords;
     std::vector<std::pair<std::uint64_t,std::vector<std::uint8_t>>> blocks;
     std::size_t nodes=0,roots=0,bytes=0,readFailures=0,incompleteRecords=0;
     bool budgetExhausted=false;std::set<std::string> budgetReasons;
@@ -36,6 +46,11 @@ class NetworkRuntimeDecoder {
         const auto capacity=value<std::int32_t>(header+12);
         return get(header,data)&&get(header+8,count)&&data>=0x10000&&!(data&7)&&count>0&&count<=8192&&capacity>=count&&capacity<=65536;
     }
+    bool cacheArray(std::uint64_t header,std::uint64_t& data,std::int32_t& count)const {
+        const auto capacity=value<std::int32_t>(header+12);
+        return get(header,data)&&get(header+8,count)&&count>=0&&count<=8192&&capacity>=count&&capacity<=65536&&
+               (!count||(data>=0x10000&&!(data&7)));
+    }
     std::string raw(std::uint64_t address,unsigned size)const {
         std::vector<std::uint8_t> bytes(size);if(!memory_.copy(address,bytes.data(),bytes.size()))return "null";
         static const char digits[]="0123456789abcdef";std::string text;text.reserve(size*2);
@@ -45,8 +60,10 @@ public:
     NetworkRuntimeDecoder(const MemoryReader& memory,const std::map<std::uint64_t,NetworkRuntimeClass>& classes,
                           const std::map<std::uint64_t,NetworkRuntimeField>& fields,const std::function<void()>& check)
         :memory_(memory),classes_(classes),fields_(fields),check_(check){for(const auto& p:classes)classIndices_[p.second.index]=&p.second;}
-    std::string decodeCache(std::uint64_t address)const {
+    std::string decodeCache(std::uint64_t address,NetworkRuntimeCacheRecord* decoded=nullptr)const {
         // FClassNetCache: FieldsBase, Super, weak Class, checksum, Fields.
+        std::array<std::uint8_t,48> readableHeader{};
+        if(!memory_.copy(address,readableHeader.data(),readableHeader.size()))return {};
         const auto index=value<std::int32_t>(address+16),serial=value<std::int32_t>(address+20);
         const auto found=classIndices_.find(index);
         if(found==classIndices_.end()||serial<1||serial>0x3fffffff)return {};
@@ -54,17 +71,20 @@ public:
         const auto base=value<std::int32_t>(address);
         const auto super=value<std::uint64_t>(address+8);
         std::uint64_t data=0;std::int32_t count=0;
-        if(base<0||base>1000000||!array(address+32,data,count))return {};
+        if(base<0||base>1000000||!cacheArray(address+32,data,count)||base+count>1000000)return {};
+        const NetworkRuntimeClass* superClass=nullptr;
         if(super){
             const auto parentIndex=value<std::int32_t>(super+16);
             const auto parent=classIndices_.find(parentIndex);
             if(parent==classIndices_.end()||parent->second->path!=cls.super)return {};
             // Parent caches may have no local fields.
             const auto parentBase=value<std::int32_t>(super),n=value<std::int32_t>(super+40);
-            if(parentBase<0||n<0||parentBase+n!=base)return {};
-        }else if(base!=0)return {};
+            const auto parentSerial=value<std::int32_t>(super+20);
+            if(parentSerial<=0||parentSerial>0x3fffffff||parentBase<0||n<0||n>8192||parentBase+n!=base)return {};
+            superClass=parent->second;
+        }else if(base!=0||(!count&&!cls.super.empty()))return {};
         for(const unsigned stride:{24u,16u}){
-            bool valid=true;std::string rows;
+            bool valid=true;std::string rows;std::vector<NetworkRuntimeCacheEntry> entries;
             for(int i=0;i<count;++i){
                 if((i&127)==0)check_();
                 const auto at=data+(std::uint64_t)i*stride;
@@ -74,8 +94,16 @@ public:
                 if(!f||f->owner!=cls.path||netIndex!=base+i||incompatible>1){valid=false;break;}
                 if(i)rows+=',';
                 rows+="{\"path\":"+quote(f->path)+",\"field_net_index\":"+std::to_string(netIndex)+",\"checksum\":"+std::to_string(checksum)+",\"incompatible\":"+(incompatible?"true":"false")+",\"record_address\":"+quote(hex(at))+",\"record_bytes\":"+raw(at,stride)+"}";
+                entries.push_back({f->path,netIndex,checksum,incompatible!=0});
             }
-            if(valid)return "{\"kind\":\"class_net_cache\",\"class\":"+quote(cls.path)+",\"address\":"+quote(hex(address))+",\"header_bytes\":"+raw(address,48)+",\"weak_class_index\":"+std::to_string(index)+",\"weak_class_serial\":"+std::to_string(serial)+",\"super_address\":"+quote(hex(super))+",\"fields_base\":"+std::to_string(base)+",\"field_stride\":"+std::to_string(stride)+",\"class_checksum\":"+std::to_string(value<std::uint32_t>(address+24))+",\"entries\":["+rows+"],\"validation\":\"runtime_cross_checked\"}";
+            if(valid){
+                const auto fieldStride=count?stride:24u;
+                const auto classChecksum=value<std::uint32_t>(address+24);
+                const auto superPath=superClass?quote(superClass->path):"null";
+                auto json="{\"kind\":\"class_net_cache\",\"class\":"+quote(cls.path)+",\"address\":"+quote(hex(address))+",\"header_bytes\":"+raw(address,48)+",\"weak_class_index\":"+std::to_string(index)+",\"weak_class_serial\":"+std::to_string(serial)+",\"super_address\":"+quote(hex(super))+",\"super_class\":"+superPath+",\"fields_base\":"+std::to_string(base)+",\"field_count\":"+std::to_string(count)+",\"field_index_start\":"+std::to_string(base)+",\"field_index_end_exclusive\":"+std::to_string(base+count)+",\"field_index_end_inclusive\":"+(count?std::to_string(base+count-1):"null")+",\"field_stride\":"+std::to_string(fieldStride)+",\"class_checksum\":"+std::to_string(classChecksum)+",\"entries\":["+rows+"],\"validation\":\"runtime_cross_checked\"}";
+                if(decoded){decoded->classPath=cls.path;decoded->superClassPath=superClass?superClass->path:"";decoded->address=address;decoded->superAddress=super;decoded->fieldsBase=base;decoded->fieldCount=count;decoded->fieldIndexEndExclusive=base+count;decoded->fieldStride=fieldStride;decoded->classChecksum=classChecksum;decoded->entries=std::move(entries);decoded->json=json;}
+                return json;
+            }
         }
         return {};
     }
@@ -192,14 +220,24 @@ public:
                 if((off&1023)==0){check_();if(GetTickCount64()>=deadline){exhausted("time");return result;}}
                 std::int32_t weakIndex=0,serial=0;
                 if(off+48<=bytes.size()){std::memcpy(&weakIndex,bytes.data()+off+16,4);std::memcpy(&serial,bytes.data()+off+20,4);}
-                if(serial>0&&classIndices_.count(weakIndex)){
-                    auto cache=decodeCache(node.address+off);
-                    if(!cache.empty()&&cacheSeen.insert(node.address+off).second){
-                        const auto data=value<std::uint64_t>(node.address+off+32);const auto count=value<std::int32_t>(node.address+off+40);
-                        const auto stride=cache.find("\"field_stride\":24")!=std::string::npos?24u:16u;
-                        const auto parent=value<std::uint64_t>(node.address+off+8);
-                        if(capture(data,(unsigned)count*stride)&&(!parent||capture(parent,48)))result.caches.push_back(cache);
-                        else ++result.incompleteRecords;
+                // An empty standalone header has too little evidence to be a
+                // cache. Empty ancestors are accepted only through a validated
+                // nonempty child's Super link below.
+                if(serial>0&&classIndices_.count(weakIndex)&&value<std::int32_t>(node.address+off+40)>0){
+                    auto address=node.address+off;
+                    std::set<std::uint64_t> chain;
+                    for(unsigned depth=0;address&&depth<64&&chain.insert(address).second;++depth){
+                        if(cacheSeen.count(address))break;
+                        NetworkRuntimeCacheRecord record;
+                        if(decodeCache(address,&record).empty())break;
+                        const auto data=value<std::uint64_t>(address+32);
+                        if(!capture(address,48)||(record.fieldCount&&!capture(data,(unsigned)record.fieldCount*record.fieldStride))){
+                            ++result.incompleteRecords;break;
+                        }
+                        cacheSeen.insert(address);
+                        result.caches.push_back(record.json);
+                        address=record.superAddress;
+                        result.cacheRecords.push_back(std::move(record));
                     }
                 }
                 std::uint64_t pointer=0;std::memcpy(&pointer,bytes.data()+off,8);

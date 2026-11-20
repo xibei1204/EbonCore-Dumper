@@ -43,6 +43,11 @@ public:
     std::vector<ebon::Region> regions(const ebon::Module&)const override{return {{module,0x1000,false,true}};}
     bool executable(std::uint64_t address)const override{return address>=0x10800&&address<0x11000;}
     void fname(std::uint64_t address,const std::string& name) {
+        if(!names_.count(name)){
+            std::uint32_t cursor=0;copy(pool+12,&cursor,sizeof(cursor));names_[name]=cursor/2;
+            put(block+cursor,static_cast<std::uint16_t>(name.size()<<6));putBytes(block+cursor+2,name.data(),name.size());
+            cursor+=static_cast<std::uint32_t>((2+name.size()+1)&~std::size_t(1));put(pool+12,cursor);
+        }
         put(address,names_.at(name));put(address+4,std::uint32_t(0));
     }
     void fstring(std::uint64_t address,const std::wstring& value) {
@@ -107,7 +112,7 @@ public:
             put(seed[n].address+88,std::int32_t(16));
         }
         std::uint64_t fieldClass=0x50000;
-        for(const auto* type:{"IntProperty","BoolProperty","StrProperty","ArrayProperty","StructProperty","MapProperty","NameProperty","TextProperty","ObjectProperty","DoubleProperty"}){
+        for(const auto* type:{"IntProperty","BoolProperty","StrProperty","ArrayProperty","StructProperty","MapProperty","NameProperty","TextProperty","ObjectProperty","DoubleProperty","SoftObjectProperty","SoftClassProperty","Utf8StrProperty"}){
             fieldClasses_[type]=fieldClass;fname(fieldClass,type);fieldClass+=0x100;
         }
         const auto health=std::uint64_t(0x51000);
@@ -183,6 +188,123 @@ public:
         fstring(0x1d0050,L"CharacterA.Description");put(std::uint64_t(0x1d0060),std::uint64_t(0x1e0100));
         fstring(0x1e0108,L"角色说明");
         put(std::uint64_t(0x1d0028),std::uint64_t(0xffffffffffffffff));
+    }
+    void featureResources(ebon::Reflection& reflection) {
+        const auto type=[](std::uint64_t address,const char* path,int size,const char* super="",const char* kind="class"){
+            ebon::Type t;t.address=address;t.path=path;t.name=t.path.substr(t.path.rfind('.')+1);t.kind=kind;t.size=size;t.alignment=8;t.super=super;return t;
+        };
+        auto dataAsset=type(0x84000,"/Script/Engine.DataAsset",40);
+        auto table=type(0x84100,"/Script/Engine.DataTable",176);
+        table.fields={property("RowStruct","ObjectProperty",40,8)};
+        auto top=type(0x84200,"/Script/CoreUObject.TopLevelAssetPath",16,"","struct");
+        top.fields={property("PackageName","NameProperty",0,8),property("AssetName","NameProperty",8,8)};
+        auto path=type(0x84300,"/Script/CoreUObject.SoftObjectPath",32,"","struct");
+        path.fields={property("AssetPath","StructProperty",0,16),property("SubPathString","Utf8StrProperty",16,16)};
+        path.fields[0].target=top.path;put(path.fields[0].address+120,top.address);
+        auto asset=type(0x84400,"/Script/HTGame.SystematicGameFeaturesDataAsset",200,dataAsset.path.c_str());
+        asset.fields={property("DataTables","MapProperty",40,80),property("LoadedDataTables","MapProperty",120,80)};
+        put(asset.fields[0].address+120,descriptor("NameProperty",8));put(asset.fields[0].address+128,descriptor("SoftObjectProperty",40));
+        put(asset.fields[1].address+120,descriptor("NameProperty",8));put(asset.fields[1].address+128,descriptor("ObjectProperty",8));
+        auto action=type(0x84500,"/Script/Test.OpenMenuAction",8,"","struct");
+        action.fields={property("UINameToOpen","NameProperty",0,8)};
+        auto instanced=type(0x84600,"/Script/CoreUObject.InstancedStruct",16,"","struct");
+        auto row=type(0x84700,"/Script/HTGame.SystematicGameFeaturesDefinitions",64,"","struct");
+        row.fields={property("ID","NameProperty",0,8),property("Requires","ArrayProperty",8,16),
+                    property("Actions","ArrayProperty",24,16),property("UINameToOpen","NameProperty",40,8),
+                    property("QuickMenuIndex_Keyboard","IntProperty",48,4),property("QuickMenuIndex_Gamepad","IntProperty",52,4),
+                    property("bEnableQuickMenuOption","BoolProperty",56,1)};
+        const auto inner=descriptor("NameProperty",8);put(inner+16,row.fields[1].address);put(row.fields[1].address+120,inner);
+        const auto actionInner=descriptor("StructProperty",16);put(actionInner+16,row.fields[2].address);
+        put(actionInner+120,instanced.address);put(row.fields[2].address+120,actionInner);
+        const unsigned char boolean[]={1,0,1,255};putBytes(row.fields[6].address+120,boolean,4);
+        auto actorComponent=type(0x84800,"/Script/Engine.ActorComponent",40);
+        auto component=type(0x84900,"/Script/HTGame.SystematicGameFeaturesComponent",56,actorComponent.path.c_str());
+        component.fields={property("ActivatedFeatureIds","ArrayProperty",40,16)};
+        const auto ids=descriptor("NameProperty",8);put(ids+16,component.fields[0].address);put(component.fields[0].address+120,ids);
+        auto derived=type(0x84a00,"/Game/UI/BP_Menu.BP_Menu_C",56,component.path.c_str());
+        auto player=type(0x84b00,"/Script/HTGame.HTPlayerState",40);
+        auto button=type(0x84c00,"/Script/HTGame.HTUI_MenuButton",56);
+        button.fields={property("GameFeatureId","NameProperty",40,8),property("FunctionUnlockId","NameProperty",48,8)};
+        auto combat=type(0x84d00,"/Script/HTGame.CombatConfig",120,dataAsset.path.c_str());
+        combat.fields={property("CharacterBlueprint","SoftClassProperty",40,40),property("Skill","SoftObjectProperty",80,40)};
+        auto character=type(0x84e00,"/Game/Characters/BP_Hero.BP_Hero_C",48);
+        character.fields={property("Attack","IntProperty",40,4)};
+        reflection.types={dataAsset,table,top,path,asset,action,instanced,row,actorComponent,component,derived,player,button,combat,character};
+        reflection.objects={
+            {300,0xa2000,asset.address,"DA_SystematicGameFeatures","SystematicGameFeaturesDataAsset","/Game/UI/DA_SystematicGameFeatures.DA_SystematicGameFeatures"},
+            {301,0xa2200,table.address,"DT_SystematicGameFeatures","DataTable","/Game/UI/DT_SystematicGameFeatures.DT_SystematicGameFeatures"},
+            {302,0xa2400,table.address,"FeatureExtra","DataTable","/Game/UI/FeatureExtra.FeatureExtra"},
+            {303,0xa2600,derived.address,"MenuComponent","BP_Menu_C","/Engine/Transient.Player.MenuComponent"},
+            {304,0xa2800,player.address,"Player","HTPlayerState","/Engine/Transient.Player"},
+            {305,0xa2a00,button.address,"Button","HTUI_MenuButton","/Engine/Transient.Player.Button"},
+            {306,0xa2c00,derived.address,"Default__MenuComponent","BP_Menu_C","/Game/UI/BP_Menu.Default__MenuComponent"},
+            {307,0xa2e00,combat.address,"DA_CharacterCombat","CombatConfig","/Game/Characters/DA_CharacterCombat.DA_CharacterCombat"},
+            {308,0x84e00,0x60000,"BP_Hero_C","BlueprintGeneratedClass",character.path},
+            {309,0xa3000,character.address,"Default__BP_Hero_C","BP_Hero_C","/Game/Characters/BP_Hero.Default__BP_Hero_C"},
+            {310,0xa3200,dataAsset.address,"DA_Skill","DataAsset","/Game/Skills/DA_Skill.DA_Skill"}
+        };
+        for(const auto& o:reflection.objects)object(o.address,o.klass,o.index,o.name);
+        put(std::uint64_t(0xa2620),std::uint64_t(0xa2800));put(std::uint64_t(0xa2608),std::uint32_t(0x40000));
+        put(std::uint64_t(0xa2c08),std::uint32_t(0x10));put(std::uint64_t(0xa3008),std::uint32_t(0x10));
+        put(std::uint64_t(0xa3028),std::int32_t(900));
+        const auto soft=[&](std::uint64_t address,const char* package,const char* name){
+            fname(address+8,package);fname(address+16,name);put(address+24,ebon::resources::ArrayHeader{});
+        };
+        sparseMap(0xa2028,0x110000,3,{0,1,2});
+        fname(0x110000,"Main");soft(0x110008,"/Game/UI/DT_SystematicGameFeatures","DT_SystematicGameFeatures");
+        fname(0x110038,"Extra");soft(0x110040,"/Game/UI/FeatureExtra","FeatureExtra");
+        fname(0x110070,"Unloaded");soft(0x110078,"/Game/UI/NotLoaded","NotLoaded");
+        sparseMap(0xa2078,0x110200,1,{0});fname(0x110200,"Extra");put(std::uint64_t(0x110208),std::uint64_t(0xa2400));
+        for(unsigned i=0;i<2;++i){
+            const auto t=0xa2200+i*0x200,rowData=0x120000+i*0x200,itemsData=0x121000+i*0x200;
+            put(std::uint64_t(t+40),row.address);sparseMap(t+48,itemsData,1,{0});fname(itemsData,i?"Extra":"Main");put(std::uint64_t(itemsData+8),std::uint64_t(rowData));
+            fname(rowData,i?"Extra":"Main");put(rowData+8,ebon::resources::ArrayHeader{0x122000,1,1});fname(0x122000,"Unlock1");
+            put(rowData+24,ebon::resources::ArrayHeader{0x122100,1,1});put(std::uint64_t(0x122100),action.address);put(std::uint64_t(0x122108),std::uint64_t(0x122200));fname(0x122200,"MainForm");
+            fname(rowData+40,"MainForm");put(rowData+48,std::int32_t(2));put(rowData+52,std::int32_t(3));put(rowData+56,std::uint8_t(1));
+        }
+        put(std::uint64_t(0xa2628),ebon::resources::ArrayHeader{0x123000,1,1});fname(0x123000,"Main");
+        fname(0xa2a28,"Main");fname(0xa2a30,"Unlock1");
+        soft(0xa2e28,"/Game/Characters/BP_Hero","BP_Hero_C");soft(0xa2e50,"/Game/Skills/DA_Skill","DA_Skill");
+    }
+    void networkFeatureResources(ebon::Reflection& reflection,const std::filesystem::path& output){
+        const std::string target="/Script/HTGame.SystematicGameFeaturesComponent";
+        std::map<std::uint64_t,ebon::NetworkRuntimeClass> classes={
+            {0x84000,{0x84000,1,"/Script/CoreUObject.Object",""}},
+            {0x84100,{0x84100,2,"/Script/HTGame.HTSystematicComponent","/Script/CoreUObject.Object"}},
+            {0x84200,{0x84200,3,target,"/Script/HTGame.HTSystematicComponent"}}
+        };
+        const std::array<const char*,3> names={"ClientGameFeaturesToReadyForActivate","ClientOnSystematicGameFeatureActivated","ServerSetupSystematicGameFeatures"};
+        std::map<std::uint64_t,ebon::NetworkRuntimeField> fields;
+        reflection.types.clear();
+        for(const auto& pair:classes){ebon::Type t;t.address=pair.first;t.kind="class";t.path=pair.second.path;t.super=pair.second.super;reflection.types.push_back(t);}
+        for(unsigned i=0;i<3;++i){
+            const auto address=0x151000ull+i*0x100;fields[address]={address,target+"."+names[i],target,0,true,1,1};
+            ebon::Type t;t.kind="function";t.name=names[i];t.path=target+"."+names[i];t.address=address;t.flags=i==2?0x220cc0:0x1020cc0;reflection.types.push_back(t);
+        }
+        const std::function<void()> check=[](){};
+        ebon::NetworkRuntimeDecoder decoder(*this,classes,fields,check);
+        const auto cache=[&](std::uint64_t address,int index,std::uint64_t parent,int count){
+            put(address,std::int32_t(0));put(address+8,parent);put(address+16,std::int32_t(index));put(address+20,std::int32_t(7));
+            put(address+32,ebon::resources::ArrayHeader{count?0x133000ull:0ull,count,count});
+        };
+        cache(0x130000,1,0,0);cache(0x130100,2,0x130000,0);cache(0x130200,3,0x130100,3);
+        for(unsigned i=0;i<3;++i){
+            put(0x133000+i*24,std::uint64_t(0x151000+i*0x100));put(0x133008+i*24,std::int32_t(i));put(0x13300c+i*24,std::uint32_t(100+i));
+        }
+        put(std::uint64_t(0x134000),std::uint64_t(0x130200));
+        const auto result=decoder.scan({0x134000},{module,0x1000,L"fixture",L"fixture"},2000);
+        require(result.cacheRecords.size()==3,"target cache did not retain the two empty ancestor caches");
+        require(result.cacheRecords.front().fieldsBase==0&&result.cacheRecords.front().fieldCount==3,"zero-based real field indices were rejected");
+        put(std::uint64_t(0x133038),std::int32_t(-1));
+        require(decoder.decodeCache(0x130200).empty(),"sentinel field index was accepted");
+        put(std::uint64_t(0x133038),std::int32_t(2));
+        reflection.runtimeNetwork=result;reflection.networkCacheCandidates=result.caches;
+        reflection.objects.clear();
+        for(const auto& pair:classes)reflection.objects.push_back({pair.second.index,pair.first,0x60000,"Class","Class",pair.second.path});
+        reflection.objects.push_back({4,0x134000,0x60000,"Driver","IpNetDriver","/Engine/Transient.Driver"});
+        std::filesystem::create_directories(output);
+        ebon::save(output/"network_metadata.json",reflection.networkJson());
+        reflection.write(output/"reflection",true);
     }
     void sceneResources(ebon::Reflection& reflection) {
         ebon::Type world;world.kind="class";world.path="/Script/Engine.World";world.address=0x81000;world.size=48;
@@ -386,6 +508,26 @@ int run(const std::filesystem::path& output) {
     require(!ebon::resources::scriptIdentity("/Script/Test.EvaluationEngine"),"Lua matcher accepted evaluation substring");
     require(ebon::resources::categories("SkinnedMesh") == std::vector<std::string>{"other_assets"},"rendering skin terms were misclassified");
     require(ebon::resources::categories("/GAME/MAPS/NPC_LUA") == ebon::resources::categories("/game/maps/npc_lua"),"resource categories depend on casing");
+    {
+        Fixture featureMemory;
+        ebon::Reflection featureReflection(featureMemory,config,{Fixture::module,0x1000,L"fixture",L"fixture"});
+        require(featureReflection.collect(),"feature fixture seed failed");
+        featureReflection.moduleSha256="synthetic-feature-self-test";
+        featureMemory.featureResources(featureReflection);
+        ebon::resources::Dumper dumper(featureMemory,featureReflection,config,output/"features");
+        require(dumper.run(),"target feature capture failed");
+        featureMemory.networkFeatureResources(featureReflection,output/"features");
+    }
+    {
+        Fixture longMemory;
+        ebon::Reflection longReflection(longMemory,config,{Fixture::module,0x1000,L"fixture",L"fixture"});
+        require(longReflection.collect(),"long path seed failed");
+        longMemory.sceneResources(longReflection);
+        longReflection.objects[7].path="/Engine/Transient."+std::string(290,'W')+".QuestRuntime";
+        ebon::resources::Dumper dumper(longMemory,longReflection,config,output/"long-path");
+        require(dumper.run(),"long widget Outer path prevented capture");
+        require(contents(output/"long-path"/"resource_manifest.jsonl").find("data/_long/object_")!=std::string::npos,"long path did not use a short filename");
+    }
     std::cout<<"Resource self-test passed: table values, sparse holes, corrupt bitmaps, transient assets, scene coordinates, defaults, Lua asset values, references, categories, text candidates and budgets\n";
     return 0;
 }

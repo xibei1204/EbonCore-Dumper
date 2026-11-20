@@ -10,6 +10,9 @@ Windows x64 / Unreal Engine 5 的只读反射采集、C++ SDK 生成与资源导
 - 生成 C++ 声明、继承、布局断言、布尔位访问器和网络查询接口。
 - 只读采集并逐字节重验 UE `LocalNetworkVersion`，SDK 用可选 UInt32 导出，未观测时保持 `nullopt`。
 - 用 F10 重复导出表行、资产配置、场景反射值及对象引用。
+- F10 优先生成 feature_exports/systematic_game_features.json 与 feature_table_rows.jsonl：实际 DA_SystematicGameFeatures、DataTables 引用、完整表行、菜单按钮绑定和非默认菜单组件实例。
+- network_metadata.json 的 systematic_game_features_component 只接受运行时交叉验证的 FClassNetCache，记录目标函数的真实 FieldNetIndex、父类缓存、字段数量和索引边界；未采到时保持 not_observed，不会用 -1 或 RPCId 猜值。
+- F10 生成战斗资产及蓝图依赖清单；export-battle-assets 按装载路径保全对应原始包文件，保留缺包和 IoStore 重建边界。详见 [菜单与战斗资源采集](docs/GAMEPLAY_CAPTURE.md)。
 - `resources.jsonl` **只作索引**；正文保存在各分类 `data/*.jsonl` 独立文件中。
 - 保全 loose / Pak / IoStore 资源，保留来源路径、状态与 SHA-256。
 - 搜索 AES Pak 索引密钥，只接受完整索引 SHA-1 验证通过的候选；在本次采集的 Dumper 终端窗口内按 F9 触发（也可写 `aes_hunt.request`）。

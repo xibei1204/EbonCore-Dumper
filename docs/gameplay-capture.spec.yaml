@@ -1,0 +1,35 @@
+format: EbonGameplayCaptureContract-v1
+source: read_only_loaded_reflection_and_runtime_cache_bytes
+menu:
+  asset: DA_SystematicGameFeatures
+  reference_fields: [DataTables, LoadedDataTables, FunctionUnlockDataTable, MainFormVisibilityConfigDataTable]
+  preserve_rows: all_fields
+  required_feature_fields: [ID, Requires, Actions, UINameToOpen]
+  quick_menu_fields: preserve_all
+  component: /Script/HTGame.SystematicGameFeaturesComponent
+  functions:
+    - ClientGameFeaturesToReadyForActivate
+    - ClientOnSystematicGameFeatureActivated
+    - ServerSetupSystematicGameFeatures
+  indices:
+    source: FClassNetCache
+    unknown: null
+    parent_caches: include_zero_local_fields
+    bounds: [fields_base, field_count, field_index_end_exclusive]
+    verification: replay_saved_header_and_field_bytes
+  instance_identity: [object, name, class, outer, owner_player, object_flags, is_default_subobject]
+  menu_bindings: [GameFeatureId, FunctionUnlockId]
+battle:
+  dependency_sources: [loaded_reflected_hard_references, soft_asset_paths, blueprint_class_defaults]
+  output: original_package_files_and_load_paths
+  iostore_reconstruction: unavailable
+  server_load_verified: false
+limits:
+  reference_depth: 8
+  default_objects: 4096
+  share_existing_capture_budgets: true
+unresolved:
+  - unloaded_assets
+  - unreflected_native_component_state
+  - dynamic_dependencies_not_present_in_reflected_fields
+  - packet_and_dedicated_server_acceptance

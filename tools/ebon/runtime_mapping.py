@@ -53,8 +53,21 @@ def checked_runtime_mapping(source: Path, owners: list[dict], expected_sha: str,
         header=block(cache.get('header_bytes'),address,48)
         base,=struct.unpack_from('<i',header,0);weak_index,serial=struct.unpack_from('<ii',header,16)
         data,count,capacity=struct.unpack_from('<Qii',header,32)
-        if cache.get('validation')!='runtime_cross_checked' or indices.get(weak_index,{}).get('path')!=cls or serial<=0 or base<0 or count!=len(cache['entries']) or capacity<count:
+        if cache.get('validation')!='runtime_cross_checked' or indices.get(weak_index,{}).get('path')!=cls or not 0<serial<0x40000000 or not 0<=base<=1000000 or count!=len(cache['entries']) or not 0<=count<=8192 or not count<=capacity<=65536 or base+count>1000000:
             raise CodegenError('Runtime class cache header failed cross-check')
+        parent_pointer,=struct.unpack_from('<Q',header,8)
+        if parent_pointer:
+            parent_header=memory.read(parent_pointer,48)
+            parent_base,=struct.unpack_from('<i',parent_header)
+            parent_index,parent_serial=struct.unpack_from('<ii',parent_header,16)
+            parent_count,=struct.unpack_from('<i',parent_header,40)
+            if (indices.get(parent_index,{}).get('path')!=types.get(cls,{}).get('super') or
+                    not 0<parent_serial<0x40000000 or not 0<=parent_count<=8192 or parent_base<0 or parent_base+parent_count!=base):
+                raise CodegenError('Runtime class cache parent range failed cross-check')
+        elif base!=0:
+            raise CodegenError('Runtime root class cache has a nonzero field base')
+        for key,expected in (('field_count',count),('field_index_start',base),('field_index_end_exclusive',base+count)):
+            if key in cache and cache[key]!=expected:raise CodegenError('Runtime class cache index boundary mismatch')
         stride=cache['field_stride']
         if stride not in (16,24):raise CodegenError('Unsupported field cache stride')
         for position,entry in enumerate(cache['entries']):
@@ -63,8 +76,11 @@ def checked_runtime_mapping(source: Path, owners: list[dict], expected_sha: str,
             field=fields.get(entry['path'])
             if not field or pointer&~1!=field['address'] or field['owner']!=cls or index!=base+position or index!=entry['field_net_index'] or checksum!=entry['checksum']:
                 raise CodegenError('Runtime field cache entry failed cross-check')
+            incompatible=bool(body[16]) if stride==24 else False
+            if (stride==24 and body[16]>1) or entry.get('incompatible',incompatible)!=incompatible:
+                raise CodegenError('Runtime field cache compatibility flag mismatch')
             field_indices.append(dict(class_=cls,path=entry['path'],field_net_index=index,checksum=checksum,
-                                      cache_address=cache['address'],record_address=hex(data+position*stride),rpc=field['rpc']))
+                                      cache_address=cache['address'],record_address=hex(data+position*stride),rpc=field['rpc'],incompatible=incompatible))
         caches.append(cache)
     for layout in raw.get('rep_layouts',[]):
         cls=layout['class'];address=int(layout['address'],0)

@@ -45,7 +45,14 @@ class Dumper {
     std::int32_t maxEntries_=0,maxString_=0;
     unsigned maxDepth_=0;
     std::size_t unresolved_=0,resources_=0,rows_=0,texts_=0;
+
     std::map<std::string,std::size_t> counts_;
+    struct CapturedBody {std::string file,kind;std::size_t rows=0,issues=0;};
+    struct AssetReference {std::string root,source,target,kind;};
+    std::map<std::string,CapturedBody> capturedBodies_;
+    std::vector<AssetReference> assetReferences_;
+    std::string captureRoot_;
+    bool captureReferences_=false;
 
     std::int64_t option(const char* key,std::int64_t fallback,std::int64_t low,std::int64_t high)const{
         const auto n=config_.number(key,fallback);
@@ -178,6 +185,15 @@ class Dumper {
             }
         }
         result/=packageName+(objectSuffix.empty()?std::string():"."+objectSuffix)+".jsonl";
+        // A widget's Outer chain can exceed the filesystem's per-component
+        // limit even when the capture directory is short. Keep its identity
+        // in the JSON/manifest and use a stable short filename in that case.
+        if(result.native().size()>180){
+            std::uint64_t hash=14695981039346656037ull;
+            for(const unsigned char byte:identity){hash^=byte;hash*=1099511628211ull;}
+            std::ostringstream name;name<<"object_"<<std::hex<<std::setfill('0')<<std::setw(16)<<hash<<".jsonl";
+            return std::filesystem::path("data")/"_long"/name.str();
+        }
         return result;
     }
     std::string prepareBodyPath(const std::string& identity)const{
@@ -378,6 +394,10 @@ class Dumper {
             }
             return quote(s);
         }
+        if(d.type=="Utf8StrProperty"){
+            std::string s;if(!utf8String(address,s))return unavailable("invalid FUtf8String",address,d.size);
+            return quote(s);
+        }
         if(d.type=="TextProperty")return text(address,d);
         if(d.type=="StructProperty"&&d.target)return structure(address,*d.target,depth+1);
         if(d.type=="ObjectProperty"||d.type=="ClassProperty"||d.type=="ObjectPtrProperty"){
@@ -386,14 +406,19 @@ class Dumper {
             auto i=objects_.find(p);
             if(i==objects_.end()||!current(*i->second))return unavailable("object reference absent/stale/encoded",address,d.size);
             line(references_,"{\"source\":"+quote(location_)+",\"kind\":\"object\",\"target\":"+quote(i->second->path)+",\"index\":"+std::to_string(i->second->index)+"}");
+            assetReference(i->second->path,"object");
             return "{\"object\":"+quote(i->second->path)+",\"index\":"+std::to_string(i->second->index)+"}";
         }
         if(d.type=="SoftObjectProperty"||d.type=="SoftClassProperty"){
             auto i=paths_.find("/Script/CoreUObject.SoftObjectPath");
             if(i!=paths_.end()&&i->second->size&&*i->second->size<=d.size&&!i->second->fields.empty()){
-                const auto path=structure(address+d.size-*i->second->size,*i->second,depth+1);
-                line(references_,"{\"source\":"+quote(location_)+",\"kind\":\"soft_path\",\"value\":"+path+"}");
-                return path;
+                const auto pathAddress=address+d.size-*i->second->size;
+                const auto path=structure(pathAddress,*i->second,depth+1);
+                const auto canonical=assetPath(pathAddress,*i->second);
+                if(canonical.empty())return unavailable("soft asset path could not be decoded",pathAddress,*i->second->size);
+                line(references_,"{\"source\":"+quote(location_)+",\"kind\":\"soft_path\",\"target\":"+quote(canonical)+",\"value\":"+path+"}");
+                if(canonical!="None")assetReference(canonical,"soft_path");
+                return "{\"asset_path\":"+quote(canonical)+",\"value\":"+path+"}";
             }
         }
         if(d.type=="ArrayProperty"||d.type=="MapProperty"||d.type=="SetProperty")return container(address,d,depth);
@@ -426,6 +451,7 @@ class Dumper {
         }
         checkpoint();
         ++resources_;
+        capturedBodies_[object.path]={file,kind,count,issues};
     }
     void table(const Object& o,const Type& type){
         const Property* rowProperty=nullptr;
@@ -543,7 +569,7 @@ class Dumper {
         std::uint64_t outer=0;reflection_.read(o.address,reflection_.layout().objOuter,outer);
         auto parent=objects_.find(outer);
         const auto outerPath=parent!=objects_.end()&&current(*parent->second)?quote(parent->second->path):"null";
-        std::ofstream out(output_/file,std::ios::binary);if(!out)throw std::runtime_error("cannot open object output");
+        std::ofstream out(output_/file,std::ios::binary);if(!out)throw std::runtime_error("cannot open object output: "+(output_/file).u8string());
         if(kind=="CurveTableMetadata")unavailable("CurveTable native curve rows are not decoded: "+o.path,o.address);
         line(out,"{\"kind\":"+quote(kind)+",\"object\":"+quote(o.path)+",\"class\":"+quote(type.path)+
             ",\"outer\":"+outerPath+",\"is_default\":"+(o.name.rfind("Default__",0)==0?"true":"false")+
@@ -554,6 +580,9 @@ class Dumper {
         out.close();if(!out)throw std::runtime_error("cannot finalize object output");
         index(o,identity,file,kind,1,unresolved_-before);
     }
+    // Targeted capture helpers are defined here, using the same validated
+    // value decoder and budgets as ordinary resource bodies.
+    #include "ebon_feature_capture.inl"
     void state(const std::string& status,const std::string& error=""){
         std::string categoriesJson="{";
         for(const auto& c:categoryNames()){
@@ -631,7 +660,13 @@ public:
             addDiagnostics(reflection_.errors,"reflection_error");
             if(diagnosticRows<1000)addDiagnostics(reflection_.unresolved,"reflection_unresolved");
             if(diagnosticRows<1000)addDiagnostics(reflection_.optionalUnresolved,"reflection_optional_unresolved");
+            capturePriorities();
+            if(config_.number("resource_feature_only",0)){
+                state(resources_?(unresolved_?"complete_with_unresolved":"complete"):"no_resources");
+                return resources_>0;
+            }
             for(const auto& o:reflection_.objects){
+                if(capturedBodies_.count(o.path)||types_.count(o.address))continue;
                 checkpoint();auto i=types_.find(o.klass);if(i==types_.end())continue;
                 const auto& type=*i->second;
                 if(isA(&type,"/Script/Engine.DataTable")&&o.name.rfind("Default__",0)!=0){
@@ -656,6 +691,7 @@ public:
             // Tables and DataAssets retain priority over potentially numerous
             // scene objects. Each object is emitted once and shares the budget.
             for(const auto& o:reflection_.objects){
+                if(capturedBodies_.count(o.path)||types_.count(o.address))continue;
                 checkpoint();auto i=types_.find(o.klass);if(i==types_.end())continue;
                 const auto& type=*i->second;
                 if(isA(&type,"/Script/Engine.DataTable")||isA(&type,"/Script/Engine.StringTable")||

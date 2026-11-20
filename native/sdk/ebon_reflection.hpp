@@ -7,7 +7,7 @@ namespace ebon {
 struct Layout {
     std::int64_t poolBlocks=16,poolBlock=8,poolCursor=12,nameShift=6,nameWide=1,nameHeader=2,nameStride=2,nameBits=16;
     std::int64_t chunks=16,numElements=36,maxElements=32,numChunks=44,maxChunks=40,itemStride=24,itemObject=0,elementsPerChunk=65536;
-    std::int64_t objIndex=12,objClass=16,objName=24,objOuter=32,nameNumber=4;
+    std::int64_t objIndex=12,objClass=16,objName=24,objOuter=32,objFlags=8,nameNumber=4;
     std::int64_t structSuper=64,structSize=88,structFields=80,fieldClass=8,fieldNext=32,fieldName=40,fieldClassName=0;
     std::int64_t propArray=56,propElement=60,propFlags=64,propOffset=76,propTarget=-1,boolMask=-1;
     std::int64_t functionFlags=176,functionParmsSize=182,functionNative=216,enumNames=64,enumStride=16;
@@ -20,6 +20,7 @@ struct Layout {
         EBON_LAYOUT(chunks,"object_array_chunks_offset");EBON_LAYOUT(numElements,"object_array_num_elements_offset");EBON_LAYOUT(maxElements,"object_array_max_elements_offset");EBON_LAYOUT(numChunks,"object_array_num_chunks_offset");EBON_LAYOUT(maxChunks,"object_array_max_chunks_offset");
         EBON_LAYOUT(itemStride,"object_item_stride");EBON_LAYOUT(itemObject,"object_item_object_offset");EBON_LAYOUT(elementsPerChunk,"object_array_elements_per_chunk");
         EBON_LAYOUT(objIndex,"object_index_offset");EBON_LAYOUT(objClass,"object_class_offset");EBON_LAYOUT(objName,"object_name_offset");EBON_LAYOUT(objOuter,"object_outer_offset");EBON_LAYOUT(nameNumber,"fname_number_offset");
+        EBON_LAYOUT(objFlags,"object_flags_offset");
         EBON_LAYOUT(structSuper,"struct_super_offset");EBON_LAYOUT(structSize,"struct_size_offset");EBON_LAYOUT(structFields,"struct_child_properties_offset");EBON_LAYOUT(fieldClass,"field_class_offset");EBON_LAYOUT(fieldNext,"field_next_offset");EBON_LAYOUT(fieldName,"field_name_offset");EBON_LAYOUT(fieldClassName,"field_class_name_offset");
         EBON_LAYOUT(propArray,"property_array_dim_offset");EBON_LAYOUT(propElement,"property_element_size_offset");EBON_LAYOUT(propFlags,"property_flags_offset");EBON_LAYOUT(propOffset,"property_offset_offset");EBON_LAYOUT(propTarget,"property_target_offset");EBON_LAYOUT(boolMask,"bool_field_mask_offset");
         EBON_LAYOUT(functionFlags,"function_flags_offset");EBON_LAYOUT(functionParmsSize,"function_params_size_offset");EBON_LAYOUT(functionNative,"function_native_offset");EBON_LAYOUT(enumNames,"enum_names_offset");EBON_LAYOUT(enumStride,"enum_item_stride");
@@ -29,7 +30,7 @@ struct Layout {
 #undef EBON_LAYOUT
         const std::int64_t mandatory[]={poolBlocks,poolBlock,poolCursor,objIndex,objClass,objName,objOuter,chunks,numElements,maxElements,numChunks,maxChunks,itemObject,structSuper,structSize,structFields,fieldClass,fieldNext,fieldName,fieldClassName,propArray,propElement,propFlags,propOffset,enumNames};
         for(auto n:mandatory)if(n<0||n>4096)throw std::runtime_error("layout offset outside supported 0..4096");
-        for(auto n:{functionRpcId,functionRpcResponseId,propertyRepIndex,propertyRepCondition,propertyRepNotify})
+        for(auto n:{objFlags,functionRpcId,functionRpcResponseId,propertyRepIndex,propertyRepCondition,propertyRepNotify})
             if(n< -1||n>4096)throw std::runtime_error("network layout offset outside supported -1..4096");
         if(nameShift<0||nameShift>15||nameHeader<2||nameHeader>16||nameStride<1||nameStride>8||nameBits<12||nameBits>20||nameNumber<4||nameNumber>12||itemStride<8||itemStride>128||elementsPerChunk<256||elementsPerChunk>1048576||maxObjects<1||maxObjects>10000000||maxFields<1||maxFields>65536||maxNameLength<4||maxNameLength>4096||maxTypeSize<1||maxTypeSize>268435456||scanMb<1||scanMb>4096||enumStride<16||enumStride>64)throw std::runtime_error("layout bounds invalid");
     }
@@ -478,6 +479,43 @@ public:
             }
         }
     }
+    std::string systematicNetworkJson()const {
+        const std::string target="/Script/HTGame.SystematicGameFeaturesComponent";
+        std::map<std::string,const Type*> classes;
+        for(const auto& type:types)if(type.kind=="class")classes[type.path]=&type;
+        std::set<std::string> hierarchy;auto path=target;
+        while(!path.empty()&&hierarchy.size()<64&&hierarchy.insert(path).second){
+            const auto it=classes.find(path);if(it==classes.end())break;path=it->second->super;
+        }
+        bool first=true,targetObserved=false;
+        std::string result="{\"target_class\":"+quote(target)+",\"cache_chain\":[";
+        for(const auto& cache:runtimeNetwork.cacheRecords)if(hierarchy.count(cache.classPath)){
+            if(!first)result+=',';first=false;result+=cache.json;
+            if(cache.classPath==target)targetObserved=true;
+        }
+        result+="],\"target_functions\":{";
+        const std::array<const char*,3> requested={"ClientGameFeaturesToReadyForActivate","ClientOnSystematicGameFeatureActivated","ServerSetupSystematicGameFeatures"};
+        bool complete=targetObserved;
+        for(const auto& ancestor:hierarchy){
+            bool observed=false;for(const auto& cache:runtimeNetwork.cacheRecords)if(cache.classPath==ancestor)observed=true;
+            complete=complete&&observed;
+        }
+        for(std::size_t i=0;i<requested.size();++i){
+            if(i)result+=',';result+=quote(requested[i])+":{\"observations\":[";
+            bool observed=false;
+            for(const auto& cache:runtimeNetwork.cacheRecords)if(cache.classPath==target)
+                for(const auto& entry:cache.entries)if(entry.path==target+"."+requested[i]){
+                    if(observed)result+=',';observed=true;
+                    result+="{\"field_net_index\":"+std::to_string(entry.fieldNetIndex)+
+                        ",\"cache_address\":"+quote(hex(cache.address))+",\"incompatible\":"+(entry.incompatible?"true":"false")+"}";
+                    if(entry.incompatible)complete=false;
+                }
+            complete=complete&&observed;
+            result+="],\"status\":"+quote(observed?"runtime_observed":"not_observed")+"}";
+        }
+        return result+"},\"status\":"+quote(complete?"runtime_observed":targetObserved?"partial":"not_observed")+
+            ",\"packet_verified\":false}";
+    }
     std::string networkJson()const {
         std::string out="{\"format\":\"EbonNetwork-v1\",\"rpc_count\":"+std::to_string(rpcCount)+",\"replicated_property_count\":"+std::to_string(replicatedPropertyCount)+",\"rpcs\":[";
         bool first=true;
@@ -501,10 +539,12 @@ public:
         }
         out+="],\"layout_offsets\":{\"function_rpc_id\":"+std::to_string(l_.functionRpcId)+",\"function_rpc_response_id\":"+std::to_string(l_.functionRpcResponseId)+",\"property_rep_index\":"+std::to_string(l_.propertyRepIndex)+",\"property_rep_condition\":"+std::to_string(l_.propertyRepCondition)+",\"property_rep_notify\":"+std::to_string(l_.propertyRepNotify)+"}";
         out+=",\"runtime_cache_candidates\":[";for(std::size_t i=0;i<networkCacheCandidates.size();++i){if(i)out+=',';out+=networkCacheCandidates[i];}out+="]";
+        out+=",\"runtime_cache_records\":[";for(std::size_t i=0;i<runtimeNetwork.cacheRecords.size();++i){if(i)out+=',';out+=runtimeNetwork.cacheRecords[i].json;}out+="]";
+        out+=",\"systematic_game_features_component\":"+systematicNetworkJson();
         out+=",\"rep_layouts\":[";for(std::size_t i=0;i<runtimeNetwork.layouts.size();++i){if(i)out+=',';out+=runtimeNetwork.layouts[i];}out+="]";
         std::string reasons;for(const auto& reason:runtimeNetwork.budgetReasons){if(!reasons.empty())reasons+=',';reasons+=quote(reason);}
         out+=",\"runtime_scan\":{\"roots\":"+std::to_string(runtimeNetwork.roots)+",\"nodes\":"+std::to_string(runtimeNetwork.nodes)+",\"bytes\":"+std::to_string(runtimeNetwork.bytes)+",\"read_failures\":"+std::to_string(runtimeNetwork.readFailures)+",\"incomplete_records\":"+std::to_string(runtimeNetwork.incompleteRecords)+",\"budget_reasons\":["+reasons+"],\"budget_exhausted\":"+(runtimeNetwork.budgetExhausted?"true":"false")+"}";
-        return out+",\"runtime_mapping_status\":\"not_observed\",\"limitations\":[\"RPCId is UFunction service metadata, not an assumed wire FieldNetIndex\",\"RepIndex and class table positions are not FRepLayout handles\",\"FClassNetCache, FRepLayout and Iris handle mappings require an observed active network context\"]}\n";
+        return out+",\"runtime_mapping_status\":"+quote(runtimeNetwork.cacheRecords.empty()?"not_observed":"runtime_cache_observed")+",\"limitations\":[\"RPCId is UFunction service metadata, not an assumed wire FieldNetIndex\",\"RepIndex and class table positions are not FRepLayout handles\",\"FClassNetCache, FRepLayout and Iris handle mappings require an observed active network context\"]}\n";
     }
     void collectRuntimeNetworkCaches() {
         std::map<std::uint64_t,NetworkRuntimeClass> classes;
@@ -547,6 +587,26 @@ public:
             if(o.name.compare(0,9,"Default__")==0||o.className.find("NetDriver")==std::string::npos)continue;
             const auto cls=classes.find(o.klass);addRoot(o,cls==classes.end()?nullptr:&cls->second);
         }
+        for(const auto& o:objects){
+            if(o.name.rfind("Default__",0)==0)continue;
+            auto cls=classes.find(o.klass);std::set<std::string> lineage;bool target=false;
+            for(auto ancestor=cls;ancestor!=classes.end()&&lineage.insert(ancestor->second.path).second;){
+                if(ancestor->second.path=="/Script/HTGame.SystematicGameFeaturesComponent"){target=true;break;}
+                auto parent=classesByPath.find(ancestor->second.super);
+                if(parent==classesByPath.end())break;ancestor=classes.find(parent->second->address);
+            }
+            if(!target)continue;
+            std::uint32_t flags=0;
+            if(read(o.address,l_.objFlags,flags)&&(flags&0x30u))continue;
+            addRoot(o,cls==classes.end()?nullptr:&cls->second);
+            const Object* owner=&o;std::set<std::uint64_t> seen;
+            for(unsigned n=0;n<16;++n){
+                std::uint64_t outer=0;if(!read(owner->address,l_.objOuter,outer)||!seen.insert(outer).second)break;
+                const auto next=objectMap_.find(outer);if(next==objectMap_.end())break;owner=&next->second;
+                auto ownerClass=classes.find(owner->klass);
+                addRoot(*owner,ownerClass==classes.end()?nullptr:&ownerClass->second);
+            }
+        }
         const std::set<std::string> focusPaths={
             "/Script/Engine.ActorChannel",
             "/Script/Engine.NetConnection",
@@ -555,6 +615,9 @@ public:
             "/Script/Engine.GameStateBase",
             "/Script/Engine.WorldDataLayers",
             "/Script/HTGame.HTPlayerCharacter",
+            "/Script/HTGame.SystematicGameFeaturesComponent",
+            "/Script/HTGame.HTSystematicComponent",
+            "/Script/HTGame.HTPlayerController",
             "/Script/Engine.CharacterMovementComponent",
             "/Script/HTGame.HTPlayerCharacterMovementComponent",
             "/Script/HTGame.HTAbilitySystemComponent",
@@ -624,7 +687,9 @@ public:
         const std::function<void()> check=[&](){checkDeadline();};
         NetworkRuntimeDecoder decoder(mem_,classes,fields,check);
         report("network_runtime",0,roots.size());
-        runtimeNetwork=decoder.scan(roots,module_,20000,allObjects,rootSizes);
+        const auto scanMs=config_.number("network_scan_budget_ms",20000);
+        if(scanMs<1000||scanMs>120000)throw std::runtime_error("network_scan_budget_ms must be in 1000..120000");
+        runtimeNetwork=decoder.scan(roots,module_,(unsigned)scanMs,allObjects,rootSizes);
         networkCacheCandidates=runtimeNetwork.caches;
         report("network_runtime",runtimeNetwork.nodes,runtimeNetwork.nodes);
     }
@@ -656,7 +721,17 @@ public:
     void write(const std::filesystem::path& out,bool ok)const {
         std::filesystem::create_directories(out);save(out/"dump_state.json","{\"status\":\"writing\",\"success\":false}\n");
         std::ostringstream os,ts;
-        for(const auto& o:objects)os<<"{\"index\":"<<o.index<<",\"address\":"<<quote(hex(o.address))<<",\"path\":"<<quote(o.path)<<",\"name\":"<<quote(o.name)<<",\"class\":"<<quote(o.className)<<"}\n";
+        for(const auto& o:objects){
+            std::uint64_t outer=0;std::uint32_t flags=0;
+            read(o.address,l_.objOuter,outer);const bool flagsRead=read(o.address,l_.objFlags,flags);
+            const auto parent=objectMap_.find(outer),klass=objectMap_.find(o.klass);
+            os<<"{\"index\":"<<o.index<<",\"address\":"<<quote(hex(o.address))<<",\"path\":"<<quote(o.path)
+              <<",\"name\":"<<quote(o.name)<<",\"class\":"<<quote(o.className)
+              <<",\"class_path\":"<<(klass==objectMap_.end()?"null":quote(klass->second.path))
+              <<",\"outer\":"<<(parent==objectMap_.end()?"null":quote(parent->second.path))
+              <<",\"object_flags\":"<<(flagsRead?quote(hex(flags)):"null")
+              <<",\"is_default_subobject\":"<<(flagsRead?((flags&0x00040000u)?"true":"false"):"null")<<"}\n";
+        }
         for(const auto& t:types){ts<<"{\"kind\":"<<quote(t.kind)<<",\"name\":"<<quote(t.name)<<",\"path\":"<<quote(t.path)<<",\"address\":"<<quote(hex(t.address))<<",\"size\":"<<(t.size?std::to_string(*t.size):"null")<<",\"alignment\":"<<(t.alignment?std::to_string(*t.alignment):"null")<<",\"parameter_size\":"<<(t.parameterSize?std::to_string(*t.parameterSize):"null")<<",\"super\":"<<(t.super.empty()?"null":quote(t.super))<<",\"flags\":"<<(t.flags?quote(hex(*t.flags)):"null")<<",\"rpc_id\":"<<(t.rpcId?std::to_string(*t.rpcId):"null")<<",\"rpc_response_id\":"<<(t.rpcResponseId?std::to_string(*t.rpcResponseId):"null")<<",\"native_rva\":"<<(t.nativeRva?quote(hex(*t.nativeRva)):"null")<<",\"complete\":"<<(t.complete?"true":"false")<<",\"fields\":[";for(std::size_t i=0;i<t.fields.size();++i){if(i)ts<<',';ts<<propertyJson(t.fields[i]);}ts<<"],\"enum_values\":[";for(std::size_t i=0;i<t.enumValues.size();++i){if(i)ts<<',';ts<<"{\"name\":"<<quote(t.enumValues[i].first)<<",\"value\":"<<t.enumValues[i].second<<'}';}ts<<"]}\n";}
         save(out/"objects.jsonl",os.str());save(out/"types.jsonl",ts.str());save(out/"network_metadata.json",networkJson());
         save(out/"network_evidence.json",networkEvidenceJson());

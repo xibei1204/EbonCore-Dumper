@@ -24,6 +24,8 @@ from tools.ebon.network_version import checked_network_version
 from tools.ebon.resource_bundle import BundleLimits, dump_resources
 from tools.ebon.resource_bodies import export_resource_bodies
 from tools.ebon.oodle import OodleDecoder
+from tools.ebon.feature_capture import audit_feature_capture
+from tools.ebon.battle_assets import export_battle_assets
 
 
 def _write_new(path: Path, value: dict) -> None:
@@ -412,6 +414,15 @@ def wait_for_network_version(capture: Path, timeout: float = 600.0) -> dict:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="ebon-dumper")
     commands = parser.add_subparsers(dest="command", required=True)
+    feature_audit = commands.add_parser("verify-feature-capture", help="audit actual feature tables, instances and runtime menu RPC indices")
+    feature_audit.add_argument("--capture", required=True, help="finished F10 resources/res_N directory")
+    battle = commands.add_parser("export-battle-assets", help="preserve original package bytes for captured character/skill references")
+    battle.add_argument("--capture", required=True)
+    battle.add_argument("--client", required=True)
+    battle.add_argument("--out", required=True)
+    battle.add_argument("--key-env", default="EBON_AES_KEY")
+    battle.add_argument("--oodle-dll")
+    battle.add_argument("--oodle-sha256")
     sdk = commands.add_parser("generate-sdk", help="generate headers from a complete reflection dump")
     sdk.add_argument("--dump", required=True, help="directory containing dump_state.json and JSONL files")
     sdk.add_argument("--out", required=True, help="SDK output directory")
@@ -489,6 +500,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        if args.command == "verify-feature-capture":
+            try:
+                result = audit_feature_capture(Path(args.capture))
+            except (ValueError, KeyError, TypeError) as error:
+                raise CodegenError("Invalid feature capture: " + str(error)) from error
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0 if result["success"] else 1
         if args.command in {'verify-network-version','wait-network-version'}:
             if args.command=='wait-network-version':result=wait_for_network_version(Path(args.capture),args.seconds)
             else:
@@ -496,11 +514,16 @@ def main(argv: list[str] | None = None) -> int:
                 except ValueError as error:raise CodegenError('Invalid NetworkVersion evidence: '+str(error)) from error
             print(json.dumps(result,ensure_ascii=False,indent=2));return 0 if result['verified'] else 1
         decoder = None
-        if args.command in {"dump-res", "extract-pak"}:
+        if args.command in {"dump-res", "extract-pak", "export-battle-assets"}:
             if args.oodle_sha256 and not args.oodle_dll:
                 raise ContainerError("--oodle-sha256 requires --oodle-dll")
             if args.oodle_dll:
                 decoder = OodleDecoder(Path(args.oodle_dll), args.oodle_sha256)
+        if args.command == "export-battle-assets":
+            result = export_battle_assets(Path(args.capture), Path(args.client), Path(args.out),
+                                          key=os.environ.get(args.key_env), decompressor=decoder)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0 if result["status"] == "preserved" else 1
         if args.command == "dump-res":
             if args.all and args.include:
                 raise ContainerError("--all and --include are mutually exclusive")
