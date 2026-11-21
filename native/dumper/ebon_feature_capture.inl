@@ -53,6 +53,12 @@ bool battleResource(const Object& object,const Type& type)const{
             isA(&type,"/Script/GameplayAbilities.AbilitySystemComponent"))&&
            battleIdentity(object.path+" "+type.path+" "+type.super);
 }
+bool miniMapDataAsset(const Object& object,const Type& type)const{
+    if(types_.count(object.address)||!isA(&type,"/Script/HTGame.MiniMapDataAsset"))return false;
+    // The CDO holds the hard DataTable references even when no live map screen
+    // has instantiated the asset. Include it alongside loaded runtime copies.
+    return instance(object)||object.name.rfind("Default__",0)==0;
+}
 const Object* playerOwner(const Object& object)const{
     std::set<std::uint64_t> seen;const Object* cursor=&object;
     for(unsigned depth=0;cursor&&depth<32;++depth){
@@ -140,6 +146,7 @@ void capturePriorities(){
     std::map<std::string,const Object*> byPath;
     std::map<std::uint64_t,const Object*> defaults;
     std::vector<const Object*> menu;
+    std::vector<const Object*> maps;
     std::array<std::vector<const Object*>,3> battle;
     for(const auto& object:reflection_.objects){
         checkpoint();
@@ -149,6 +156,7 @@ void capturePriorities(){
         if(featureAsset(object,*type->second)||featureTable(object,*type->second)||featureComponent(object,*type->second)||
            menuBinding(object,*type->second)||containsField(type->second,{"functionunlockdatatable","mainformvisibilityconfigdatatable"}))
             menu.push_back(&object);
+        if(miniMapDataAsset(object,*type->second))maps.push_back(&object);
         if(battleResource(object,*type->second)){
             const auto rank=instance(object)&&(isA(type->second,"/Script/Engine.DataTable")||
                 isA(type->second,"/Script/Engine.DataAsset"))?0:templateObject(object)?1:2;
@@ -193,7 +201,9 @@ void capturePriorities(){
         stage.visited=queue.size();return stage;
     };
     const auto menuStage=runStage(menu,menuMax,false);
-    writeFeatureReports(menuStage.limited);
+    const auto mapMax=(std::size_t)option("resource_map_max_objects",4096,1,65536);
+    const auto mapStage=runStage(maps,mapMax,false);
+    writeFeatureReports(menuStage.limited||mapStage.limited);
     std::vector<const Object*> battleSeeds;
     for(const auto& tier:battle)battleSeeds.insert(battleSeeds.end(),tier.begin(),tier.end());
     const auto battleStage=runStage(battleSeeds,battleMax,true);
@@ -207,7 +217,8 @@ void capturePriorities(){
             ",\"depth_limited_references\":"+std::to_string(stage.depthLimited)+"}";
     };
     line(plan,"{\"format\":\"EbonPriorityCapture-v1\",\"dependency_depth\":"+std::to_string(maxDepth)+
-        ",\"menu\":"+stageJson(menuStage,menu.size(),menuMax)+",\"battle\":"+stageJson(battleStage,battleSeeds.size(),battleMax)+
+        ",\"menu\":"+stageJson(menuStage,menu.size(),menuMax)+",\"maps\":"+stageJson(mapStage,maps.size(),mapMax)+
+        ",\"battle\":"+stageJson(battleStage,battleSeeds.size(),battleMax)+
         ",\"battle_config_candidates\":"+std::to_string(battle[0].size())+"}");
     plan.close();if(!plan)throw std::runtime_error("cannot finalize priority capture report");
 }
@@ -232,6 +243,9 @@ void writeFeatureReports(bool limited){
     for(const auto& ref:assetReferences_)
         if(ref.source.find(".DataTables")!=ref.source.npos||ref.source.find(".LoadedDataTables")!=ref.source.npos||
            ref.source.find(".FunctionUnlockDataTable")!=ref.source.npos||ref.source.find(".MainFormVisibilityConfigDataTable")!=ref.source.npos)
+            tablePaths.insert(ref.target);
+    for(const auto& ref:assetReferences_)
+        if(ref.source.find(".MiniMapLevelFogBlockDataTable")!=ref.source.npos)
             tablePaths.insert(ref.target);
     for(const auto& path:tablePaths){
         auto object=byPath.find(path);if(object==byPath.end())continue;
@@ -263,7 +277,8 @@ void writeFeatureReports(bool limited){
     if(tables.empty())missing("feature_tables_not_observed");
     for(const auto& ref:assetReferences_)
         if((ref.source.find(".DataTables")!=ref.source.npos||ref.source.find(".FunctionUnlockDataTable")!=ref.source.npos||
-            ref.source.find(".MainFormVisibilityConfigDataTable")!=ref.source.npos)&&!capturedBodies_.count(ref.target)){
+            ref.source.find(".MainFormVisibilityConfigDataTable")!=ref.source.npos||
+            ref.source.find(".MiniMapLevelFogBlockDataTable")!=ref.source.npos)&&!capturedBodies_.count(ref.target)){
             if(!first)json+=',';first=false;json+=quote("table_not_exported: "+ref.target);bufferBudget(json);
         }
     json+="],\"coverage\":\"loaded reflected values; body_file retains every field; unreflected native state and unloaded assets remain unavailable\"}";

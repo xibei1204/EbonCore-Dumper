@@ -306,6 +306,31 @@ public:
         ebon::save(output/"network_metadata.json",reflection.networkJson());
         reflection.write(output/"reflection",true);
     }
+    void miniMapResources(ebon::Reflection& reflection) {
+        const auto type=[](std::uint64_t address,const char* path,int size,const char* super="",const char* kind="class"){
+            ebon::Type t;t.address=address;t.path=path;t.name=t.path.substr(t.path.rfind('.')+1);t.kind=kind;t.size=size;t.alignment=8;t.super=super;return t;
+        };
+        auto dataAsset=type(0x85000,"/Script/Engine.DataAsset",40);
+        auto table=type(0x85100,"/Script/Engine.DataTable",176);
+        table.fields={property("RowStruct","ObjectProperty",40,8)};
+        auto asset=type(0x85200,"/Script/HTGame.MiniMapDataAsset",48,dataAsset.path.c_str());
+        asset.fields={property("MiniMapLevelFogBlockDataTable","ObjectProperty",40,8)};
+        auto row=type(0x85300,"/Script/HTGame.MiniMapFogBlockData",48,"","struct");
+        row.fields={property("BelongsLevel","StrProperty",8,16),
+                    property("BelongsGameplayAreaID","NameProperty",24,8),
+                    property("DefaultUnlock","BoolProperty",32,1)};
+        const unsigned char boolean[]={1,0,1,255};putBytes(row.fields[2].address+120,boolean,4);
+        reflection.types={dataAsset,table,asset,row};
+        constexpr std::uint64_t miniTableObject=0xa3600,miniAssetObject=0xa3800,miniRowItems=0x130000,miniRowData=0x140000;
+        reflection.objects={
+            {400,miniTableObject,table.address,"DT_MiniMapFogBlock","DataTable","/Game/DataTable/DT_MiniMapFogBlock.DT_MiniMapFogBlock"},
+            {401,miniAssetObject,asset.address,"Default__MiniMapDataAsset","MiniMapDataAsset","/Script/HTGame.Default__MiniMapDataAsset"}
+        };
+        for(const auto& objectRecord:reflection.objects)object(objectRecord.address,objectRecord.klass,objectRecord.index,objectRecord.name);
+        put(miniTableObject+40,row.address);put(miniAssetObject+40,miniTableObject);
+        sparseMap(miniTableObject+48,miniRowItems,1,{0});fname(miniRowItems,"FogBlock_001");put(miniRowItems+8,miniRowData);
+        fstring(miniRowData+8,L"XL_map_bigworld");fname(miniRowData+24,"GameplayArea_01");put(miniRowData+32,std::uint8_t(1));
+    }
     void sceneResources(ebon::Reflection& reflection) {
         ebon::Type world;world.kind="class";world.path="/Script/Engine.World";world.address=0x81000;world.size=48;
         world.fields={property("PersistentLevel","ObjectProperty",40,8)};
@@ -568,6 +593,25 @@ int run(const std::filesystem::path& output) {
                 "already exported generic dependency vanished from the battle closure");
     }
     {
+        Fixture mapMemory;
+        ebon::Reflection mapReflection(mapMemory,config,{Fixture::module,0x1000,L"fixture",L"fixture"});
+        require(mapReflection.collect(),"map fixture seed failed");
+        mapMemory.miniMapResources(mapReflection);
+        auto focused=config;focused.values["resource_feature_only"]="1";
+        const auto folder=output/"minimap-fog-blocks";
+        ebon::resources::Dumper dumper(mapMemory,mapReflection,focused,folder);
+        require(dumper.run(),"mini-map priority capture failed");
+        const auto fogBody=contents(folder/"data"/"DataTable"/"DT_MiniMapFogBlock.jsonl");
+        require(fogBody.find("\"row\":\"FogBlock_001\"")!=fogBody.npos&&
+                fogBody.find("\"map_block_id\":\"FogBlock_001\"")!=fogBody.npos,
+                "mini-map fog table row key was not exported as its map block ID");
+        const auto mapRows=contents(folder/"feature_exports"/"feature_table_rows.jsonl");
+        require(mapRows.find("\"map_block_id\":\"FogBlock_001\"")!=mapRows.npos,
+                "mini-map fog row was missing from the feature table export");
+        require(contents(folder/"feature_exports"/"priority_capture.json").find("\"maps\":{\"candidates\":1")!=std::string::npos,
+                "mini-map DataAsset was not included in priority capture");
+    }
+    {
         Fixture longMemory;
         ebon::Reflection longReflection(longMemory,config,{Fixture::module,0x1000,L"fixture",L"fixture"});
         require(longReflection.collect(),"long path seed failed");
@@ -577,7 +621,7 @@ int run(const std::filesystem::path& output) {
         require(dumper.run(),"long widget Outer path prevented capture");
         require(contents(output/"long-path"/"resource_manifest.jsonl").find("data/_long/object_")!=std::string::npos,"long path did not use a short filename");
     }
-    std::cout<<"Resource self-test passed: table values, sparse holes, corrupt bitmaps, transient assets, scene coordinates, defaults, Lua asset values, references, categories, text candidates and budgets\n";
+    std::cout<<"Resource self-test passed: table values and map block IDs, sparse holes, corrupt bitmaps, transient assets, scene coordinates, defaults, Lua asset values, references, categories, text candidates and budgets\n";
     return 0;
 }
 } // namespace

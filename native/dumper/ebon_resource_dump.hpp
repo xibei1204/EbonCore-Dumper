@@ -487,7 +487,13 @@ class Dumper {
         std::ofstream out(output_/file,std::ios::binary);if(!out)throw std::runtime_error("cannot open table output");
         const auto before=unresolved_;
         line(out,"{\"kind\":\"DataTable\",\"object\":"+quote(o.path)+",\"row_type\":"+quote(rowType.path)+",\"row_map_offset\":"+std::to_string(offset)+",\"layout\":\"validated_native_candidate\"}");
-        for(const auto& row:rows){location_=o.path+"["+row.first+"]";line(out,"{\"row\":"+quote(row.first)+",\"values\":"+structure(row.second,rowType,0)+"}");++rows_;}
+        const bool miniMapFogBlock=rowType.path=="/Script/HTGame.MiniMapFogBlockData";
+        for(const auto& row:rows){
+            location_=o.path+"["+row.first+"]";
+            line(out,"{\"row\":"+quote(row.first)+(miniMapFogBlock?",\"map_block_id\":"+quote(row.first):std::string())+
+                ",\"values\":"+structure(row.second,rowType,0)+"}");
+            ++rows_;
+        }
         SparseView after;
         if(!current(o)||!sparse(o.address+offset,after)||!(view.header==after.header)||view.live!=after.live)
             unavailable("DataTable changed during capture: "+o.path,o.address);

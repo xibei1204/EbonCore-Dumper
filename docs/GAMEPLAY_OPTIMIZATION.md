@@ -5,7 +5,7 @@
 ## 本次调整
 
 - F10 默认先采集反射元数据和资源正文，再扫描网络。网络阶段刷新内存页并复用本次类型清单，避免重新导出整个 SDK；网络耗时使用单独预算。`resource_defer_network=0` 恢复原先顺序。
-- 菜单与战斗分别使用 `resource_feature_max_objects` / `resource_battle_max_objects`，默认各 4096。配置表和 DataAsset 排在 CDO、运行实例之前；每个根对象发现的依赖先于下一个宽泛候选处理。
+- 菜单、地图和战斗分别使用 `resource_feature_max_objects` / `resource_map_max_objects` / `resource_battle_max_objects`，默认各 4096。MiniMapDataAsset（包括保存硬引用的 CDO）作为地图采集入口；加载的 `MiniMapFogBlockData` 表行会同时写出原始行名和 `map_block_id`。
 - 硬引用、软引用和生成类的 CDO 继续递归采集；依赖即使没有 Skill/Character 等命名，也保留在战斗报告中。`resource_dependency_depth` 默认 8，范围 1..64。
 - JSONL 按文件和状态边界刷盘，取消每行强制刷盘。完成状态发布前检查缓冲输出，失败时保留已完成正文。
 - 网络类层级查询使用路径索引，同一次扫描只验证同一候选起点一次。
@@ -35,7 +35,7 @@ python tools/ebon_cli.py audit-gameplay `
 
 完整的已验证 Parents/Cmds、缓存字段和 handle 记录保存在报告的 `captures[].network.validated_records` 中，保留每个来源地址与原始字节；`configurations[].file` 相对于对应 capture，是原始配置正文的位置。
 
-`feature_exports/priority_capture.json` 记录菜单/战斗候选数量、访问数量、名额及深度截断。`capture_pipeline.json` 记录元数据、资源、网络各阶段耗时。`resource_state.json` 在延迟网络阶段结束前保持 collecting；网络失败不会删除已保存正文。
+`feature_exports/priority_capture.json` 记录菜单/地图/战斗候选数量、访问数量、名额及深度截断。`capture_pipeline.json` 记录元数据、资源、网络各阶段耗时。`resource_state.json` 在延迟网络阶段结束前保持 collecting；网络失败不会删除已保存正文。
 
 ## 网络预算
 

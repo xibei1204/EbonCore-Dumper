@@ -1,8 +1,8 @@
 # 菜单功能与战斗资源采集
 
-2026-11-21 更新：配置正文优先、菜单/战斗独立名额、依赖优先处理、网络证据与遍历预算分离以及多次采集审计，见 [采集优化](GAMEPLAY_OPTIMIZATION.md)。下述菜单/战斗优先级均指资源导出阶段；网络扫描默认在正文保存后执行。
+2026-11-21 更新：配置正文优先、菜单/地图/战斗独立名额、依赖优先处理、网络证据与遍历预算分离以及多次采集审计，见 [采集优化](GAMEPLAY_OPTIMIZATION.md)。下述优先级均指资源导出阶段；网络扫描默认在正文保存后执行。
 
-本次改动增加目标优先采集。先处理菜单资产、引用配置、功能表、实际组件和按钮，再处理战斗资源及其依赖，最后处理普通资源。采集器只读访问已加载对象，不调用游戏函数加载未加载资产。
+本次改动增加目标优先采集。菜单资产、引用配置、功能表、实际组件和按钮之后，会从 MiniMapDataAsset 的实例或 CDO 沿硬引用采集已加载地图表；`MiniMapFogBlockData` 表行会输出 `row` 和 `map_block_id`，两者取自实际 DataTable 行名。随后采集战斗资源及其依赖，最后处理普通资源。采集器只读访问已加载对象，不调用游戏函数加载未加载资产。
 
 ## 使用
 
@@ -31,12 +31,13 @@ python tools/ebon_cli.py export-battle-assets --capture $Capture --client 'C:/Pr
 | 文件 | 内容 |
 | --- | --- |
 | feature_exports/systematic_game_features.json | 实际资产候选、目标表、非默认组件、按钮、软/硬引用及未采到项 |
-| feature_exports/feature_table_rows.jsonl | 目标表与 DataTables/LoadedDataTables 引用的已加载表：原始头和每一整行，不裁剪 ID、Requires、Actions、UINameToOpen、快捷菜单字段 |
+| feature_exports/feature_table_rows.jsonl | 目标表以及 DataTables/LoadedDataTables/MiniMapLevelFogBlockDataTable 引用的已加载表：原始头和每一整行；雾区行另标出 `map_block_id` |
 | data/.../*.jsonl | 完整反射正文，包括按钮 GameFeatureId / FunctionUnlockId、组件已反射的功能记录和激活字段 |
 | reflection/objects.jsonl | 对象路径、名称、Class 路径、Outer、ObjectFlags、是否默认子对象 |
 | reflection/network_metadata.json | systematic_game_features_component：三个目标函数的索引观察、父类缓存、字段数量、索引范围 |
 | reflection/network_memory.bin / .json | 可离线重放的缓存头和完整字段记录字节 |
 | feature_exports/battle_resources.jsonl | 战斗配置、角色/技能资产、蓝图 CDO 正文及装载路径 |
+| `data/.../DT_MiniMapFogBlock.jsonl` | 已加载的迷雾区表正文；每行包含由 DataTable 行名给出的 `map_block_id` |
 | 战斗导出目录下的 battle_assets.json | 每个包的原始文件位置、SHA-256、装载路径及导出状态 |
 
 组件反射字段为空时，不伪造其原生内部容器。组件正文、已反射祖先字段、Outer 和玩家归属仍保留。若有多个真实资产，全部保留，引用来源用于判断用途；不凭名称断言某一个必然正在使用。
