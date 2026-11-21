@@ -380,7 +380,7 @@ public:
         if(type=="EnumProperty")result+=",\"underlying\":"+child(extra,"underlying");
         return result+"}";
     }
-    bool collect() {
+    bool collect(bool includeNetwork=true) {
         if(!layoutVerified_&&!discover())return false;
         checkDeadline();
         if(!arrayHeader(objects_,chunkTable_,count_)){errors.push_back("object array changed before collection");return false;}
@@ -423,7 +423,7 @@ public:
             types.push_back(std::move(t));}
         if(types.empty()){errors.push_back("no reflected types found; class/layout validation is insufficient");return false;}
         if(invalidObjects)unresolved.push_back(std::to_string(invalidObjects)+" non-null object slots failed validation (mutation or unknown layout)");
-        if(config_.number("collect_network",1)!=0){
+        if(includeNetwork&&config_.number("collect_network",1)!=0){
             collectClassNetworkTables();
             collectRuntimeNetworkCaches();
         }
@@ -543,7 +543,7 @@ public:
         out+=",\"systematic_game_features_component\":"+systematicNetworkJson();
         out+=",\"rep_layouts\":[";for(std::size_t i=0;i<runtimeNetwork.layouts.size();++i){if(i)out+=',';out+=runtimeNetwork.layouts[i];}out+="]";
         std::string reasons;for(const auto& reason:runtimeNetwork.budgetReasons){if(!reasons.empty())reasons+=',';reasons+=quote(reason);}
-        out+=",\"runtime_scan\":{\"roots\":"+std::to_string(runtimeNetwork.roots)+",\"nodes\":"+std::to_string(runtimeNetwork.nodes)+",\"bytes\":"+std::to_string(runtimeNetwork.bytes)+",\"read_failures\":"+std::to_string(runtimeNetwork.readFailures)+",\"incomplete_records\":"+std::to_string(runtimeNetwork.incompleteRecords)+",\"budget_reasons\":["+reasons+"],\"budget_exhausted\":"+(runtimeNetwork.budgetExhausted?"true":"false")+"}";
+        out+=",\"runtime_scan\":{\"roots\":"+std::to_string(runtimeNetwork.roots)+",\"nodes\":"+std::to_string(runtimeNetwork.nodes)+",\"bytes\":"+std::to_string(runtimeNetwork.bytes)+",\"traversal_bytes\":"+std::to_string(runtimeNetwork.traversalBytes)+",\"layout_probes\":"+std::to_string(runtimeNetwork.layoutProbes)+",\"graph_retained\":"+(runtimeNetwork.graphRetained?"true":"false")+",\"read_failures\":"+std::to_string(runtimeNetwork.readFailures)+",\"incomplete_records\":"+std::to_string(runtimeNetwork.incompleteRecords)+",\"budget_reasons\":["+reasons+"],\"budget_exhausted\":"+(runtimeNetwork.budgetExhausted?"true":"false")+"}";
         return out+",\"runtime_mapping_status\":"+quote(runtimeNetwork.cacheRecords.empty()?"not_observed":"runtime_cache_observed")+",\"limitations\":[\"RPCId is UFunction service metadata, not an assumed wire FieldNetIndex\",\"RepIndex and class table positions are not FRepLayout handles\",\"FClassNetCache, FRepLayout and Iris handle mappings require an observed active network context\"]}\n";
     }
     void collectRuntimeNetworkCaches() {
@@ -689,7 +689,18 @@ public:
         report("network_runtime",0,roots.size());
         const auto scanMs=config_.number("network_scan_budget_ms",20000);
         if(scanMs<1000||scanMs>120000)throw std::runtime_error("network_scan_budget_ms must be in 1000..120000");
-        runtimeNetwork=decoder.scan(roots,module_,(unsigned)scanMs,allObjects,rootSizes);
+        const auto bounded=[&](const char* key,std::int64_t fallback,std::int64_t low,std::int64_t high){
+            const auto n=config_.number(key,fallback);
+            if(n<low||n>high)throw std::runtime_error(std::string(key)+" outside supported bounds");return n;
+        };
+        NetworkScanLimits limits;
+        limits.maxNodes=(std::size_t)bounded("network_max_nodes",32768,1,262144);
+        limits.maxQueuedNodes=(std::size_t)bounded("network_max_queue",65536,1,524288);
+        limits.maxBytes=(std::size_t)bounded("network_evidence_mb",16,1,64)*1024*1024;
+        limits.maxTraversalBytes=(std::size_t)bounded("network_traversal_mb",64,1,512)*1024*1024;
+        limits.maxDepth=(unsigned)bounded("network_max_depth",4,1,8);
+        limits.retainGraph=bounded("network_capture_graph",1,0,1)!=0;
+        runtimeNetwork=decoder.scan(roots,module_,(unsigned)scanMs,allObjects,rootSizes,limits);
         networkCacheCandidates=runtimeNetwork.caches;
         report("network_runtime",runtimeNetwork.nodes,runtimeNetwork.nodes);
     }
@@ -733,7 +744,12 @@ public:
               <<",\"is_default_subobject\":"<<(flagsRead?((flags&0x00040000u)?"true":"false"):"null")<<"}\n";
         }
         for(const auto& t:types){ts<<"{\"kind\":"<<quote(t.kind)<<",\"name\":"<<quote(t.name)<<",\"path\":"<<quote(t.path)<<",\"address\":"<<quote(hex(t.address))<<",\"size\":"<<(t.size?std::to_string(*t.size):"null")<<",\"alignment\":"<<(t.alignment?std::to_string(*t.alignment):"null")<<",\"parameter_size\":"<<(t.parameterSize?std::to_string(*t.parameterSize):"null")<<",\"super\":"<<(t.super.empty()?"null":quote(t.super))<<",\"flags\":"<<(t.flags?quote(hex(*t.flags)):"null")<<",\"rpc_id\":"<<(t.rpcId?std::to_string(*t.rpcId):"null")<<",\"rpc_response_id\":"<<(t.rpcResponseId?std::to_string(*t.rpcResponseId):"null")<<",\"native_rva\":"<<(t.nativeRva?quote(hex(*t.nativeRva)):"null")<<",\"complete\":"<<(t.complete?"true":"false")<<",\"fields\":[";for(std::size_t i=0;i<t.fields.size();++i){if(i)ts<<',';ts<<propertyJson(t.fields[i]);}ts<<"],\"enum_values\":[";for(std::size_t i=0;i<t.enumValues.size();++i){if(i)ts<<',';ts<<"{\"name\":"<<quote(t.enumValues[i].first)<<",\"value\":"<<t.enumValues[i].second<<'}';}ts<<"]}\n";}
-        save(out/"objects.jsonl",os.str());save(out/"types.jsonl",ts.str());save(out/"network_metadata.json",networkJson());
+        save(out/"objects.jsonl",os.str());save(out/"types.jsonl",ts.str());
+        writeNetwork(out);
+        writeState(out,ok);
+    }
+    void writeNetwork(const std::filesystem::path& out)const {
+        save(out/"network_metadata.json",networkJson());
         save(out/"network_evidence.json",networkEvidenceJson());
         std::string blockIndex="{\"format\":\"EbonNetworkMemory-v1\",\"blocks\":[",memoryBytes;
         for(std::size_t i=0;i<runtimeNetwork.blocks.size();++i){
@@ -743,7 +759,6 @@ public:
         }
         save(out/"network_memory.bin",memoryBytes);save(out/"network_memory.json",blockIndex+"]}\n");
 
-        writeState(out,ok);
     }
     // Progress/failure states do not create empty metadata files or claim a successful dump.
     void writeState(const std::filesystem::path& out,bool ok,const std::string& status="")const {

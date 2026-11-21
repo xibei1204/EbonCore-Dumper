@@ -98,6 +98,20 @@ public:
         }
         const auto rootBlock=std::find_if(focusedScan.blocks.begin(),focusedScan.blocks.end(),[](const auto& block){return block.first==0x63000;});
         if(rootBlock==focusedScan.blocks.end()||rootBlock->second.size()!=768)return 29;
+        // Intermediate graph noise must not exhaust the evidence budget before
+        // a deeper layout can be reached. Roots and exact layout records remain.
+        put(0x63000,std::uint64_t(0x64000));put(0x64000,std::uint64_t(0x65000));put(0x65000,std::uint64_t(0x5b000));
+        ebon::NetworkScanLimits focusedLimits;focusedLimits.maxBytes=1600;focusedLimits.retainGraph=false;
+        const auto lean=runtime.scan({0x63000},mod,1000,{objActor,objClass},{{0x63000,512}},focusedLimits);
+        focusedLimits.retainGraph=true;
+        const auto noisyGraph=runtime.scan({0x63000},mod,1000,{objActor,objClass},{{0x63000,512}},focusedLimits);
+        if(lean.layouts.size()!=1||lean.budgetExhausted||lean.bytes>=lean.traversalBytes||
+           !noisyGraph.layouts.empty()||!noisyGraph.budgetReasons.count("bytes"))return 38;
+        focusedLimits.retainGraph=false;focusedLimits.maxTraversalBytes=512;
+        const auto traversalBound=runtime.scan({0x63000},mod,1000,{objActor,objClass},{{0x63000,512}},focusedLimits);
+        if(!traversalBound.budgetReasons.count("traversal_bytes")||traversalBound.traversalBytes!=512)return 39;
+        std::cout<<"focused network regression: evidence="<<lean.bytes<<" traversal="<<lean.traversalBytes<<" bytes; deeper layout preserved\n";
+        put(0x63000,std::uint64_t(0x5b000));put(0x64000,std::uint64_t(0));put(0x65000,std::uint64_t(0));
         // Cmds has exactly 2*32 readable bytes. Saving count*72 used to
         // silently drop the entire command table at an allocation boundary.
         deniedRanges={{0x5d040,0x5d100}};

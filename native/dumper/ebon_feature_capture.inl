@@ -134,17 +134,13 @@ void exportObject(const Object& object){
 }
 void capturePriorities(){
     if(!config_.number("resource_feature_exports",1))return;
-    const auto maxObjects=(std::size_t)option("resource_feature_max_objects",4096,1,65536);
+    const auto menuMax=(std::size_t)option("resource_feature_max_objects",4096,1,65536);
+    const auto battleMax=(std::size_t)option("resource_battle_max_objects",4096,1,65536);
+    const auto maxDepth=(unsigned)option("resource_dependency_depth",8,1,64);
     std::map<std::string,const Object*> byPath;
     std::map<std::uint64_t,const Object*> defaults;
-    std::vector<std::pair<const Object*,unsigned>> queue;
-    std::set<std::string> queued;
-    const auto enqueue=[&](const Object& object,unsigned depth){
-        if(queue.size()>=maxObjects)return;
-        if(!types_.count(object.address)&&queued.insert(object.path).second)queue.push_back({&object,depth});
-    };
-    // Menu state and its explicit reference owners go first, before large
-    // unrelated DataTables can consume the shared capture budget.
+    std::vector<const Object*> menu;
+    std::array<std::vector<const Object*>,3> battle;
     for(const auto& object:reflection_.objects){
         checkpoint();
         byPath[object.path]=&object;
@@ -152,35 +148,68 @@ void capturePriorities(){
         auto type=types_.find(object.klass);if(type==types_.end()||types_.count(object.address))continue;
         if(featureAsset(object,*type->second)||featureTable(object,*type->second)||featureComponent(object,*type->second)||
            menuBinding(object,*type->second)||containsField(type->second,{"functionunlockdatatable","mainformvisibilityconfigdatatable"}))
-            enqueue(object,0);
+            menu.push_back(&object);
+        if(battleResource(object,*type->second)){
+            const auto rank=instance(object)&&(isA(type->second,"/Script/Engine.DataTable")||
+                isA(type->second,"/Script/Engine.DataAsset"))?0:templateObject(object)?1:2;
+            battle[rank].push_back(&object);
+        }
     }
     captureReferences_=true;
-    const auto drain=[&](std::size_t start){
-        for(std::size_t n=start;n<queue.size();++n){
-            checkpoint();const auto before=assetReferences_.size();exportObject(*queue[n].first);
-            if(queue[n].second>=8)continue;
-            const auto end=assetReferences_.size();
-            for(auto i=before;i<end;++i){
-                auto found=byPath.find(assetReferences_[i].target);if(found==byPath.end())continue;
-                auto object=found->second;
-                if(types_.count(object->address)){ // A generated class reference resolves through its CDO.
-                    const auto cdo=defaults.find(object->address);
-                    if(cdo!=defaults.end())enqueue(*cdo->second,queue[n].second+1);
-                }else enqueue(*object,queue[n].second+1);
+    std::map<std::string,std::vector<std::size_t>> referenceIndices;
+    struct Stage {std::size_t visited=0,depthLimited=0;bool limited=false;};
+    const auto runStage=[&](const std::vector<const Object*>& seeds,std::size_t limit,bool battleStage){
+        Stage stage;
+        std::vector<std::pair<const Object*,unsigned>> queue;std::set<std::string> queued;
+        const auto enqueue=[&](const Object& object,unsigned depth){
+            if(types_.count(object.address)||queued.count(object.path))return;
+            if(queue.size()>=limit){stage.limited=true;return;}
+            queued.insert(object.path);queue.push_back({&object,depth});
+        };
+        std::size_t next=0;
+        for(const auto seed:seeds){
+            // Drain dependencies before the next broad seed can take their slots.
+            enqueue(*seed,0);
+            for(;next<queue.size();++next){
+                checkpoint();const auto object=queue[next].first;const auto depth=queue[next].second;
+                if(battleStage)battleObjects_.insert(object->path);
+                const auto before=assetReferences_.size();exportObject(*object);
+                const auto end=assetReferences_.size();
+                for(auto i=before;i<end;++i)referenceIndices[assetReferences_[i].root].push_back(i);
+                for(const auto i:referenceIndices[object->path]){
+                    auto found=byPath.find(assetReferences_[i].target);if(found==byPath.end())continue;
+                    auto target=found->second;
+                    if(types_.count(target->address)){
+                        const auto cdo=defaults.find(target->address);if(cdo==defaults.end())continue;target=cdo->second;
+                    }
+                    // Previously exported menu dependencies still participate
+                    // in the battle closure, including their own references.
+                    if(queued.count(target->path))continue;
+                    if(depth>=maxDepth){++stage.depthLimited;continue;}
+                    enqueue(*target,depth+1);
+                }
             }
         }
+        stage.visited=queue.size();return stage;
     };
-    drain(0);
-    writeFeatureReports(queue.size()>=maxObjects);
-    const auto battleStart=queue.size();
-    for(const auto& object:reflection_.objects){
-        checkpoint();
-        auto type=types_.find(object.klass);
-        if(type!=types_.end()&&battleResource(object,*type->second))enqueue(object,0);
-    }
-    drain(battleStart);
+    const auto menuStage=runStage(menu,menuMax,false);
+    writeFeatureReports(menuStage.limited);
+    std::vector<const Object*> battleSeeds;
+    for(const auto& tier:battle)battleSeeds.insert(battleSeeds.end(),tier.begin(),tier.end());
+    const auto battleStage=runStage(battleSeeds,battleMax,true);
     captureReferences_=false;
     writeBattleReport();
+    std::ofstream plan(output_/"feature_exports"/"priority_capture.json",std::ios::binary);
+    if(!plan)throw std::runtime_error("cannot open priority capture report");
+    const auto stageJson=[](const Stage& stage,std::size_t seeds,std::size_t limit){
+        return "{\"candidates\":"+std::to_string(seeds)+",\"visited\":"+std::to_string(stage.visited)+
+            ",\"object_limit\":"+std::to_string(limit)+",\"object_limit_reached\":"+(stage.limited?"true":"false")+
+            ",\"depth_limited_references\":"+std::to_string(stage.depthLimited)+"}";
+    };
+    line(plan,"{\"format\":\"EbonPriorityCapture-v1\",\"dependency_depth\":"+std::to_string(maxDepth)+
+        ",\"menu\":"+stageJson(menuStage,menu.size(),menuMax)+",\"battle\":"+stageJson(battleStage,battleSeeds.size(),battleMax)+
+        ",\"battle_config_candidates\":"+std::to_string(battle[0].size())+"}");
+    plan.close();if(!plan)throw std::runtime_error("cannot finalize priority capture report");
 }
 void writeFeatureReports(bool limited){
     const auto folder=output_/"feature_exports";std::filesystem::create_directories(folder);
@@ -255,11 +284,12 @@ void writeBattleReport(){
     // Include actual exported bodies and the exact reference graph. Generated
     // class paths are load targets; their metadata is in reflection/types.jsonl.
     for(const auto& object:reflection_.objects){
-        auto type=types_.find(object.klass);if(type==types_.end()||!battleResource(object,*type->second))continue;
+        auto type=types_.find(object.klass);if(type==types_.end()||
+            (!battleObjects_.count(object.path)&&!battleResource(object,*type->second)))continue;
         line(battle,objectMeta(object,*type->second));
     }
     for(const auto& ref:assetReferences_)
-        if(battleIdentity(ref.root)||battleIdentity(ref.target))
-            line(battle,"{\"kind\":\"asset_reference\",\"source\":"+quote(ref.source)+",\"target\":"+quote(ref.target)+
+        if(battleObjects_.count(ref.root)||battleIdentity(ref.root)||battleIdentity(ref.target))
+            line(battle,"{\"kind\":\"asset_reference\",\"root\":"+quote(ref.root)+",\"source\":"+quote(ref.source)+",\"target\":"+quote(ref.target)+
                 ",\"target_loaded\":"+(loaded.count(ref.target)?"true":"false")+"}");
 }

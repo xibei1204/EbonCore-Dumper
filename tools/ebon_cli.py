@@ -26,6 +26,7 @@ from tools.ebon.resource_bodies import export_resource_bodies
 from tools.ebon.oodle import OodleDecoder
 from tools.ebon.feature_capture import audit_feature_capture
 from tools.ebon.battle_assets import export_battle_assets
+from tools.ebon.gameplay_audit import audit_gameplay_captures
 
 
 def _write_new(path: Path, value: dict) -> None:
@@ -414,6 +415,10 @@ def wait_for_network_version(capture: Path, timeout: float = 600.0) -> dict:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="ebon-dumper")
     commands = parser.add_subparsers(dest="command", required=True)
+    gameplay = commands.add_parser("audit-gameplay", help="audit configuration bodies and byte-validated layout coverage across same-build captures")
+    gameplay.add_argument("--capture", required=True, action="append", help="finished F10 resources/res_N directory; repeat to compare captures")
+    gameplay.add_argument("--out", help="new JSON report outside all source captures")
+    gameplay.add_argument("--skip-network", action="store_true", help="inspect resource bodies only")
     feature_audit = commands.add_parser("verify-feature-capture", help="audit actual feature tables, instances and runtime menu RPC indices")
     feature_audit.add_argument("--capture", required=True, help="finished F10 resources/res_N directory")
     battle = commands.add_parser("export-battle-assets", help="preserve original package bytes for captured character/skill references")
@@ -500,6 +505,24 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        if args.command == "audit-gameplay":
+            sources = [Path(c).resolve() for c in args.capture]
+            output = Path(args.out).resolve() if args.out else None
+            if output and any(output.is_relative_to(c) for c in sources):
+                raise CodegenError("audit output must be outside source captures")
+            if output and output.exists():
+                raise CodegenError(f"refusing to overwrite existing output: {output}")
+            try:
+                result = audit_gameplay_captures(sources, include_network=not args.skip_network)
+            except (ValueError, KeyError, TypeError) as error:
+                raise CodegenError("invalid gameplay capture: " + str(error)) from error
+            if output:
+                output.parent.mkdir(parents=True, exist_ok=True)
+                _write_new(output, result)
+                print(json.dumps(dict(output=str(output), **result["summary"]), ensure_ascii=False, indent=2))
+            else:
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 1  # Observed data cannot establish exhaustive game coverage.
         if args.command == "verify-feature-capture":
             try:
                 result = audit_feature_capture(Path(args.capture))

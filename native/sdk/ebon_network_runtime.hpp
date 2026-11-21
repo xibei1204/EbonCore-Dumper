@@ -17,11 +17,17 @@ struct NetworkLayoutStorage {
     std::uint64_t parents=0,commands=0;
     unsigned parentCount=0,commandCount=0,parentStride=0,commandStride=0;
 };
+struct NetworkScanLimits {
+    std::size_t maxNodes=32768,maxQueuedNodes=65536,maxBytes=16*1024*1024,maxTraversalBytes=64*1024*1024;
+    unsigned maxDepth=4;
+    bool retainGraph=true;
+};
 struct NetworkRuntimeResult {
     std::vector<std::string> caches,layouts;
     std::vector<NetworkRuntimeCacheRecord> cacheRecords;
     std::vector<std::pair<std::uint64_t,std::vector<std::uint8_t>>> blocks;
-    std::size_t nodes=0,roots=0,bytes=0,readFailures=0,incompleteRecords=0;
+    std::size_t nodes=0,roots=0,bytes=0,traversalBytes=0,layoutProbes=0,readFailures=0,incompleteRecords=0;
+    bool graphRetained=true;
     bool budgetExhausted=false;std::set<std::string> budgetReasons;
 };
 class NetworkRuntimeDecoder {
@@ -29,6 +35,7 @@ class NetworkRuntimeDecoder {
     const std::map<std::uint64_t,NetworkRuntimeClass>& classes_;
     const std::map<std::uint64_t,NetworkRuntimeField>& fields_;
     std::map<std::int32_t,const NetworkRuntimeClass*> classIndices_;
+    std::map<std::string,const NetworkRuntimeClass*> classPaths_;
     const std::function<void()>& check_;
     template<class T> bool get(std::uint64_t a,T& v)const{return memory_.get(a,v);}
     template<class T> T value(std::uint64_t a)const{T v{};get(a,v);return v;}
@@ -37,8 +44,8 @@ class NetworkRuntimeDecoder {
         auto path=cls.path;std::set<std::string> seen;
         while(!path.empty()&&seen.size()<64&&seen.insert(path).second){
             if(path==owner)return true;
-            auto it=std::find_if(classes_.begin(),classes_.end(),[&](const auto& pair){return pair.second.path==path;});
-            if(it==classes_.end())break;path=it->second.super;
+            auto it=classPaths_.find(path);
+            if(it==classPaths_.end())break;path=it->second->super;
         }
         return false;
     }
@@ -59,7 +66,9 @@ class NetworkRuntimeDecoder {
 public:
     NetworkRuntimeDecoder(const MemoryReader& memory,const std::map<std::uint64_t,NetworkRuntimeClass>& classes,
                           const std::map<std::uint64_t,NetworkRuntimeField>& fields,const std::function<void()>& check)
-        :memory_(memory),classes_(classes),fields_(fields),check_(check){for(const auto& p:classes)classIndices_[p.second.index]=&p.second;}
+        :memory_(memory),classes_(classes),fields_(fields),check_(check){
+            for(const auto& p:classes){classIndices_[p.second.index]=&p.second;classPaths_[p.second.path]=&p.second;}
+        }
     std::string decodeCache(std::uint64_t address,NetworkRuntimeCacheRecord* decoded=nullptr)const {
         // FClassNetCache: FieldsBase, Super, weak Class, checksum, Fields.
         std::array<std::uint8_t,48> readableHeader{};
@@ -162,10 +171,12 @@ public:
         return {};
     }
     NetworkRuntimeResult scan(const std::vector<std::uint64_t>& roots,const Module& module,unsigned budgetMs=15000,
-                              const std::set<std::uint64_t>& objects={},const std::map<std::uint64_t,unsigned>& rootSizes={})const {
-        constexpr std::size_t maxNodes=32768,maxQueuedNodes=65536;
-        constexpr std::size_t maxBytes=16*1024*1024;
+                              const std::set<std::uint64_t>& objects={},const std::map<std::uint64_t,unsigned>& rootSizes={},
+                              const NetworkScanLimits& limits={})const {
+        const auto maxNodes=limits.maxNodes,maxQueuedNodes=limits.maxQueuedNodes,maxBytes=limits.maxBytes;
         NetworkRuntimeResult result;std::set<std::uint64_t> cacheSeen,layoutSeen;
+        std::set<std::uint64_t> layoutProbed;
+        result.graphRetained=limits.retainGraph;
         std::map<std::uint64_t,unsigned> queued,visited;
         // Store each address range once. Overlapping graph reads previously
         // consumed nearly half the evidence budget without adding bytes.
@@ -198,6 +209,7 @@ public:
             const auto found=rootSizes.find(root);
             const auto size=found==rootSizes.end()?4096u:std::max(1u,std::min(found->second,65536u));
             if(queued[root]>=size)continue;queued[root]=size;queue.push_back({root,0,size});
+            if(queue.size()>=maxQueuedNodes){exhausted("queue");break;}
         }
         result.roots=queue.size();
         const auto deadline=GetTickCount64()+budgetMs;
@@ -210,10 +222,14 @@ public:
         for(std::size_t n=0;n<queue.size()&&result.nodes<maxNodes;++n){
             check_();if(GetTickCount64()>=deadline){exhausted("time");break;}
             const auto node=queue[n];if(visited[node.address]>=node.size)continue;
+            if(node.size>limits.maxTraversalBytes-result.traversalBytes){exhausted("traversal_bytes");break;}
             visited[node.address]=node.size;
             std::vector<std::uint8_t> bytes(node.size);
             if(!memory_.copy(node.address,bytes.data(),bytes.size())){++result.readFailures;continue;}
-            ++result.nodes;if(!saveBytes(node.address,bytes))break;
+            ++result.nodes;result.traversalBytes+=bytes.size();
+            // Active UObject roots bind replay evidence to this capture even
+            // when unrelated intermediate graph allocations are discarded.
+            if((limits.retainGraph||node.depth==0)&&!saveBytes(node.address,bytes))break;
             // Pointer traversal includes the tail of small allocations; cache
             // header probes separately require their full 48 bytes.
             for(unsigned off=0;off+8<=bytes.size();off+=8){
@@ -245,7 +261,9 @@ public:
                     // Owner need not be first: inspect nearby object starts.
                     for(unsigned back=0;back<=256&&back<=off;back+=8){
                         const auto address=node.address+off-back;
-                        if(layoutSeen.count(address))continue;
+                        if(layoutSeen.count(address))break;
+                        if(!layoutProbed.insert(address).second)continue;
+                        ++result.layoutProbes;
                         NetworkLayoutStorage storage;auto layout=decodeLayout(address,&storage);
                         if(!layout.empty()){
                             layoutSeen.insert(address);
@@ -258,7 +276,7 @@ public:
                         }
                     }
                 }
-                if(node.depth>=4||queue.size()>=maxQueuedNodes||pointer<0x10000||pointer>=0x0000800000000000ull||(pointer&7)||
+                if(node.depth>=limits.maxDepth||queue.size()>=maxQueuedNodes||pointer<0x10000||pointer>=0x0000800000000000ull||(pointer&7)||
                    (pointer>=module.base&&pointer<module.base+module.size)||classes_.count(pointer)||objects.count(pointer)||field(pointer))continue;
                 unsigned size=512;
                 std::int32_t count=0,capacity=0;

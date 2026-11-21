@@ -3,6 +3,7 @@ from pathlib import Path
 import struct
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from tests.test_cpp_sdk import cpp_fixture
 from tools.ebon.cpp_sdk import generate_cpp_sdk
@@ -78,6 +79,25 @@ def dynamic_runtime_fixture(root):
 
 
 class RuntimeMappingTests(unittest.TestCase):
+    def test_focused_native_records_revalidate_without_rescanning_the_graph(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            dump=runtime_fixture(Path(temporary))
+            raw=json.loads((dump/'runtime_mapping.json').read_text())
+            (dump/'runtime_mapping.json').unlink()
+            path=dump/'network_metadata.json'
+            metadata=json.loads(path.read_text())
+            metadata.update(runtime_scan=dict(graph_retained=False),
+                            runtime_cache_records=raw['class_net_caches'],rep_layouts=raw['rep_layouts'])
+            path.write_text(json.dumps(metadata))
+            with patch('tools.ebon.network_coverage.RuntimeReplay',side_effect=AssertionError('unexpected graph replay')):
+                report=build_coverage_report(dump)
+            self.assertEqual(report['summary']['complete_layouts'],1)
+            self.assertEqual(report['evidence_source'],'native_records_revalidated_against_memory')
+            metadata['rep_layouts'][0]['commands'][0]['relative_handle']=999
+            path.write_text(json.dumps(metadata))
+            with self.assertRaises(CodegenError):
+                build_coverage_report(dump)
+
     def test_coverage_report_uses_inheritance_and_leaves_capture_unchanged(self):
         with tempfile.TemporaryDirectory() as temporary:
             dump,owners=dynamic_runtime_fixture(Path(temporary))

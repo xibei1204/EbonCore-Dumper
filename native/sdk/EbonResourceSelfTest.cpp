@@ -519,6 +519,55 @@ int run(const std::filesystem::path& output) {
         featureMemory.networkFeatureResources(featureReflection,output/"features");
     }
     {
+        Fixture priorityMemory;
+        ebon::Reflection priorityReflection(priorityMemory,config,{Fixture::module,0x1000,L"fixture",L"fixture"});
+        require(priorityReflection.collect(),"priority seed failed");
+        priorityMemory.featureResources(priorityReflection);
+        auto& tuning=priorityReflection.objects.back();
+        tuning.path="/Game/Config/DA_Tuning.DA_Tuning";tuning.name="DA_Tuning";
+        const auto tuningPath=tuning.path;
+        priorityMemory.fname(tuning.address+24,tuning.name);
+        priorityMemory.fname(0xa2e58,"/Game/Config/DA_Tuning");priorityMemory.fname(0xa2e60,"DA_Tuning");
+        const auto hero=priorityReflection.objects[9];
+        ebon::Object noise{311,0xa3400,hero.klass,"Default__BP_Noise_C",hero.className,
+            "/Game/Characters/BP_Noise.Default__BP_Noise_C"};
+        priorityMemory.object(noise.address,noise.klass,noise.index,noise.name);
+        priorityMemory.put(noise.address+8,std::uint32_t(0x10));
+        priorityReflection.objects.insert(priorityReflection.objects.begin(),noise);
+        auto limited=config;limited.values["resource_feature_only"]="1";
+        limited.values["resource_feature_max_objects"]="1";limited.values["resource_battle_max_objects"]="3";
+        const auto folder=output/"priorities";bool called=false;
+        ebon::resources::Dumper dumper(priorityMemory,priorityReflection,limited,folder);
+        require(dumper.run(false,[&](){
+            called=true;
+            require(contents(folder/"feature_exports"/"battle_resources.jsonl").find(tuningPath)!=std::string::npos,
+                    "unnamed battle dependency missing before network callback");
+            require(contents(folder/"resource_state.json").find("collecting")!=std::string::npos,
+                    "resource state completed before deferred network stage");
+        }),"independent battle budget failed");
+        require(called,"deferred stage was not called");
+        const auto manifest=contents(folder/"resource_manifest.jsonl");
+        require(manifest.find("DA_CharacterCombat")!=std::string::npos&&manifest.find(tuningPath)!=std::string::npos&&
+                manifest.find(hero.path)!=std::string::npos&&manifest.find(noise.path)==std::string::npos,
+                "menu/default noise starved a configuration or its dependencies");
+        require(contents(folder/"feature_exports"/"priority_capture.json").find("\"object_limit_reached\":true")!=std::string::npos,
+                "bounded priority capture hid its missing candidates");
+        ebon::resources::Dumper failing(priorityMemory,priorityReflection,limited,output/"deferred-failure");
+        require(!failing.run(false,[](){throw std::runtime_error("synthetic network failure");}),"deferred failure was hidden");
+        require(contents(output/"deferred-failure"/"resource_manifest.jsonl").find(tuningPath)!=std::string::npos&&
+                contents(output/"deferred-failure"/"resource_state.json").find("synthetic network failure")!=std::string::npos,
+                "deferred failure discarded completed resource evidence");
+        // A menu asset can load the same generic dependency before the battle
+        // stage. Reuse its body while retaining the complete battle closure.
+        priorityMemory.fname(0x110048,"/Game/Characters/DA_CharacterCombat");
+        priorityMemory.fname(0x110050,"DA_CharacterCombat");
+        limited.values["resource_feature_max_objects"]="4096";
+        ebon::resources::Dumper shared(priorityMemory,priorityReflection,limited,output/"shared-dependency");
+        require(shared.run(),"shared menu/battle dependency failed");
+        require(contents(output/"shared-dependency"/"feature_exports"/"battle_resources.jsonl").find("\"object\":"+ebon::quote(tuningPath))!=std::string::npos,
+                "already exported generic dependency vanished from the battle closure");
+    }
+    {
         Fixture longMemory;
         ebon::Reflection longReflection(longMemory,config,{Fixture::module,0x1000,L"fixture",L"fixture"});
         require(longReflection.collect(),"long path seed failed");

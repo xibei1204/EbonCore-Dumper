@@ -102,6 +102,8 @@ static void captureResources(const ebon::Config& config,const ebon::Module& modu
         if(timeout<1||timeout>1800)throw std::runtime_error("resource_timeout_seconds must be in 1..1800");
         ebon::console::logf("info","F10 resource capture started: %s",output.u8string().c_str());
         const auto deadline=GetTickCount64()+(ULONGLONG)timeout*1000;
+        const auto started=GetTickCount64();
+        const bool deferredNetwork=config.number("resource_defer_network",1)!=0;
         std::unique_ptr<ebon::SnapshotReader> metadata;
         std::unique_ptr<ebon::Reflection> current;
         bool reflectionClean=false;
@@ -112,7 +114,7 @@ static void captureResources(const ebon::Config& config,const ebon::Module& modu
             current=std::make_unique<ebon::Reflection>(*metadata,resourceConfig,module);
             current->moduleSha256=digest;
             current->setDeadline(deadline);
-            try{reflectionClean=current->collect();}
+            try{reflectionClean=current->collect(!deferredNetwork);}
             catch(const std::exception& e){
                 const auto detail="attempt "+std::to_string(attempt)+" threw during live reflection: "+e.what();
                 attemptDiagnostics.push_back(detail);ebon::console::log("warn","resource reflection retry: "+detail);
@@ -156,10 +158,39 @@ static void captureResources(const ebon::Config& config,const ebon::Module& modu
         // original startup snapshot, which may precede scene/asset loading.
         current->write(output/"reflection",reflectionClean);
         if(!reflectionClean)current->writeState(output/"reflection",false,"partial_live_inventory");
+        const auto metadataDone=GetTickCount64();
+        ULONGLONG resourcesDone=0,networkDone=0;
+        const auto pipeline=[&](const char* phase,const std::string& error=""){
+            ebon::save(output/"capture_pipeline.json","{\"format\":\"EbonCapturePipeline-v1\",\"phase\":"+ebon::quote(phase)+
+                ",\"network_deferred\":"+(deferredNetwork?"true":"false")+",\"metadata_ms\":"+std::to_string(metadataDone-started)+
+                ",\"resources_ms\":"+(resourcesDone?std::to_string(resourcesDone-metadataDone):"null")+
+                ",\"network_ms\":"+(networkDone&&resourcesDone?std::to_string(networkDone-resourcesDone):"null")+
+                ",\"error\":"+(error.empty()?"null":ebon::quote(error))+"}\n");
+        };
+        pipeline("resources");
         // Keep the owned discovering state: a polling Windows reader may deny
         // DeleteFileW sharing even though it allows the normal state writes.
         ebon::resources::Dumper dumper(memory,*current,resourceConfig,output);
-        const bool ok=dumper.run(true);
+        const bool ok=dumper.run(true,[&](){
+            resourcesDone=GetTickCount64();
+            if(!deferredNetwork||!resourceConfig.number("collect_network",1))return;
+            pipeline("network");
+            ebon::console::log("info","resource bodies saved; collecting network layouts with a separate budget");
+            const auto scanMs=resourceConfig.number("network_scan_budget_ms",20000);
+            if(scanMs<1000||scanMs>120000)throw std::runtime_error("network_scan_budget_ms must be in 1000..120000");
+            // Reuse the validated schema inventory, but refresh all live pages.
+            // Network traversal must not see pointers cached before body export.
+            metadata->reset();
+            current->setDeadline(GetTickCount64()+(ULONGLONG)scanMs+30000);
+            try{
+                current->collectClassNetworkTables();
+                current->collectRuntimeNetworkCaches();
+                current->writeNetwork(output/"reflection");
+            }catch(const std::exception& e){networkDone=GetTickCount64();pipeline("failed",e.what());throw;}
+            networkDone=GetTickCount64();
+        });
+        if(ok)pipeline("complete");
+        else pipeline("failed","resource or deferred network stage failed; inspect resource_state.json");
         ebon::console::logf(ok?"success":"warn","F10 resource capture finished: success=%d state=%s",
             ok?1:0,(output/"resource_state.json").u8string().c_str());
         ebon::console::logf("info","F10 resource bodies: %s",

@@ -51,6 +51,7 @@ class Dumper {
     struct AssetReference {std::string root,source,target,kind;};
     std::map<std::string,CapturedBody> capturedBodies_;
     std::vector<AssetReference> assetReferences_;
+    std::set<std::string> battleObjects_;
     std::string captureRoot_;
     bool captureReferences_=false;
 
@@ -68,7 +69,7 @@ class Dumper {
     }
     void line(std::ofstream& out,const std::string& value){
         if(value.size()+1>maxBytes_-bytes_)throw std::runtime_error("resource output byte budget exceeded");
-        out<<value<<'\n';out.flush();
+        out<<value<<'\n';
         if(!out)throw std::runtime_error("resource output write failed");
         bytes_+=value.size()+1;
     }
@@ -584,6 +585,12 @@ class Dumper {
     // value decoder and budgets as ordinary resource bodies.
     #include "ebon_feature_capture.inl"
     void state(const std::string& status,const std::string& error=""){
+        // Flush at publication boundaries; per-row flushing made large tables
+        // and reference reports issue a disk write for every JSON record.
+        for(auto* stream:{&manifest_,&issues_,&textValues_,&references_}){
+            if(stream->is_open()){stream->flush();if(!*stream)throw std::runtime_error("cannot flush resource output");}
+        }
+        for(auto& index:indexes_){index.second.flush();if(!index.second)throw std::runtime_error("cannot flush category index");}
         std::string categoriesJson="{";
         for(const auto& c:categoryNames()){
             if(categoriesJson.size()>1)categoriesJson+=',';
@@ -626,7 +633,7 @@ public:
         for(int i=0;i<bits;++i)if(flags[i/32]&(1u<<(i%32)))view.live.push_back(i);
         return view.live.size()==std::size_t(bits-free);
     }
-    bool run(bool initializingStateOwned=false){
+    bool run(bool initializingStateOwned=false,const std::function<void()>& afterResources={}){
         std::filesystem::create_directories(output_/"data");
         if((std::filesystem::exists(output_/"resource_state.json")&&!initializingStateOwned)||
            std::filesystem::exists(output_/"resource_manifest.jsonl")||
@@ -662,6 +669,7 @@ public:
             if(diagnosticRows<1000)addDiagnostics(reflection_.optionalUnresolved,"reflection_optional_unresolved");
             capturePriorities();
             if(config_.number("resource_feature_only",0)){
+                if(afterResources)afterResources();
                 state(resources_?(unresolved_?"complete_with_unresolved":"complete"):"no_resources");
                 return resources_>0;
             }
@@ -699,6 +707,7 @@ public:
                 const auto kind=extraKind(o,type);
                 if(!kind.empty())objectValues(o,type,kind);
             }
+            if(afterResources)afterResources();
             state(resources_?(unresolved_?"complete_with_unresolved":"complete"):"no_resources");
             return resources_>0;
         }catch(const std::exception& e){state("failed",e.what());return false;}

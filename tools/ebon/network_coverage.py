@@ -17,7 +17,7 @@ TARGET_BASES = {
 }
 
 
-def build_coverage_report(capture):
+def build_coverage_report(capture, *, include_records=False):
     """Cross-check existing mappings or replay bytes entirely in memory.
 
     This deliberately does not create runtime_mapping.json in the capture.
@@ -35,10 +35,18 @@ def build_coverage_report(capture):
     memory = None
     verified = dict(layouts=[], caches=[], handles=[], field_indices=[])
     evidence_source = 'no_active_captured_network_memory'
-    if active and (capture / 'network_memory.bin').stat().st_size:
+    if active and (capture / 'network_memory.bin').is_file() and (capture / 'network_memory.bin').stat().st_size:
         if mapping_path.is_file():
             raw = json.loads(mapping_path.read_text(encoding='utf-8'))
             evidence_source = 'runtime_mapping.json_revalidated_against_memory'
+        elif metadata.get('runtime_scan', {}).get('graph_retained') is False:
+            # Focused captures retain validated records and roots, rather than
+            # the intermediate traversal graph. Revalidate their bytes directly.
+            raw = dict(format='EbonRuntimeMapping-v1', capture=str(capture),
+                       module_sha256=state['build']['sha256'],
+                       class_net_caches=metadata.get('runtime_cache_records', []),
+                       rep_layouts=metadata.get('rep_layouts', []), packet_verified=False)
+            evidence_source = 'native_records_revalidated_against_memory'
         else:
             raw = RuntimeReplay(capture).scan()
             evidence_source = 'network_memory_replayed_in_memory'
@@ -93,7 +101,7 @@ def build_coverage_report(capture):
             partial_layouts=sum(l['status'] == 'partial' for l in tables),
             owners=owner_records, layouts=tables)
 
-    return dict(
+    report = dict(
         format='EbonNetworkCoverage-v1', capture=str(capture),
         module_sha256=state['build']['sha256'],
         reflection_capture_success=bool(state.get('success')),
@@ -113,6 +121,9 @@ def build_coverage_report(capture):
             'Class net cache field indices and CPF_Net totals are not layout coverage.',
             'Complete Parents/Cmds coverage does not establish packet round-trip compatibility.',
         ])
+    if include_records:
+        report['validated_records'] = verified
+    return report
 
 
 def markdown_report(report):
