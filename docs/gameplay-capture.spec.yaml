@@ -24,6 +24,14 @@ battle:
   output: original_package_files_and_load_paths
   iostore_reconstruction: unavailable
   server_load_verified: false
+characters:
+  source: loaded_DT_Character_and_HTPlayerCharacter_instances_and_generated_class_defaults
+  priority: reserve_all_roots_before_dependency_closure_and_other_stages
+  object_budget: resource_character_max_objects
+  default_budget: 1024
+  audit_source: DT_Character_CharacterActorClass_and_exact_generated_class_layout_bytes
+  merge_snapshots: false
+  unloaded_classes: report_without_loading
 limits:
   reference_depth: 8
   default_objects: 4096

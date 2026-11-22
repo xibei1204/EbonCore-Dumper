@@ -23,10 +23,13 @@ from tools.ebon.containers import ContainerError, PakFile, UtocFile
 from tools.ebon.network_version import checked_network_version
 from tools.ebon.resource_bundle import BundleLimits, dump_resources
 from tools.ebon.resource_bodies import export_resource_bodies
-from tools.ebon.oodle import OodleDecoder
+from tools.ebon.oodle import OodleDecoder, bundled_decoder
 from tools.ebon.feature_capture import audit_feature_capture
 from tools.ebon.battle_assets import export_battle_assets
 from tools.ebon.gameplay_audit import audit_gameplay_captures
+from tools.ebon.character_capture import audit_character_captures
+from tools.ebon.character_request import request_character
+from tools.ebon.sdk_merge import merge_sdk_captures
 
 
 def _write_new(path: Path, value: dict) -> None:
@@ -55,6 +58,7 @@ def inventory_resources(client: Path, output: Path, key_env: str) -> dict:
     if not pak_paths and not toc_paths:
         raise CodegenError(f"no .pak or .utoc files found under {client}")
     key = os.environ.get(key_env)
+    decoder_provenance = getattr(decompressor, 'provenance', None)
     output.mkdir(parents=True, exist_ok=True)
     errors: list[dict] = []
     unresolved: list[dict] = []
@@ -178,6 +182,7 @@ def extract_pak(
     with manifest_path.open("x", encoding="utf-8", newline="\n") as manifest:
         try:
             container = PakFile(container_path, key=key, decompressor=decompressor)
+            decoder_provenance = getattr(container.decompressor, 'provenance', None)
             entries = container.entries()
             for entry in entries:
                 if not any(fnmatch.fnmatchcase(entry.path.casefold(), p.casefold()) for p in patterns):
@@ -224,7 +229,8 @@ def extract_pak(
         "key_environment_variable": key_env if key is not None else None,
         "unresolved": unresolved,
         "errors": errors,
-        "limitations": ["Oodle-compressed entries require an external compatible decompressor."],
+        "decompressor": decoder_provenance,
+        "limitations": [],
     }
     _write_new(output / "pak_extraction_state.json", result)
     return result
@@ -273,6 +279,7 @@ def inject_and_dump(
     aes_wait_seconds: float = 180.0,
     wait_network_version: bool = False,
     network_version_wait_seconds: float = 600.0,
+    use_hotkey_publisher: bool = False,
 ) -> int:
     if wait_aes and (not math.isfinite(aes_wait_seconds) or aes_wait_seconds <= 0):
         raise CodegenError("AES wait timeout must be positive and finite")
@@ -306,6 +313,13 @@ def inject_and_dump(
     completed = subprocess.run(command, check=False)
     if completed.returncode:
         return completed.returncode
+    # AES has an independent worker; an AES-only run must not wait for F5.
+    if wait_aes and sdk is None and not use_hotkey_publisher:
+        aes_state = wait_for_aes(dump, timeout=aes_wait_seconds)
+        if wait_network_version:
+            version = wait_for_network_version(dump, network_version_wait_seconds)
+            print(json.dumps(version, ensure_ascii=False, indent=2))
+        return 0 if aes_state.get("success") else 1
     # LoadLibrary completion is asynchronous: the injected worker may still be
     # discovering/collecting, and its first state file is a progress checkpoint.
     delay = 0
@@ -319,10 +333,52 @@ def inject_and_dump(
     if wait_network_version:
         version=wait_for_network_version(dump,network_version_wait_seconds)
         print(json.dumps(version,ensure_ascii=False,indent=2))
-    if sdk is not None:
+    if use_hotkey_publisher:
+        body = wait_for_sdk_body(dump)
+        print(f"C++ SDK ready: {body['sdk_output']}", flush=True)
+    elif sdk is not None:
         result = generate_cpp_sdk(dump, sdk)
         print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if aes_state is None or aes_state.get("success") else 1
+
+
+def wait_for_sdk_body(dump: Path, timeout: float = 600.0) -> dict:
+    deadline = time.monotonic() + timeout
+    last_status = None
+    while time.monotonic() < deadline:
+        try:
+            state = json.loads((dump / "sdk_body_state.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            time.sleep(0.5)
+            continue
+        if not isinstance(state, dict) or state.get("format") != "EbonSdkBody-v1":
+            time.sleep(0.5)
+            continue
+        status = state.get("status")
+        if status == "failed":
+            raise CodegenError("C++ SDK publisher failed: " + str(state.get("error", "inspect sdk_body_state.json")))
+        if status == "complete" and state.get("success") is True:
+            if not (Path(state["sdk_output"]) / "SDK.hpp").is_file():
+                raise CodegenError("C++ SDK publisher reported success but SDK.hpp is missing")
+            return state
+        if status != last_status:
+            print(f"C++ SDK: {status}; independent F5 publisher", flush=True)
+            last_status = status
+        time.sleep(0.5)
+    raise CodegenError(f"C++ SDK publisher did not finish within {timeout:g} seconds; inspect {dump / 'sdk_body_state.json'}")
+
+
+def _uses_sdk_hotkey(profile: Path) -> bool:
+    try:
+        for line in profile.read_text(encoding="utf-8-sig").splitlines():
+            key, separator, value = line.strip().partition("=")
+            if separator and key.strip() == "sdk_hotkey":
+                return int(value.strip(), 0) != 0
+    except OSError:
+        return True  # The injector reports missing/unreadable profiles.
+    except ValueError as error:
+        raise CodegenError("invalid integer profile key: sdk_hotkey") from error
+    return True
 
 
 def wait_for_aes(dump: Path, timeout: float = 180.0) -> dict:
@@ -335,15 +391,27 @@ def wait_for_aes(dump: Path, timeout: float = 180.0) -> dict:
     hotkey_hint = False
     while time.monotonic() < deadline:
         try:
+            hotkey = json.loads(hotkey_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, PermissionError, json.JSONDecodeError):
+            hotkey = None
+        if isinstance(hotkey, dict) and hotkey.get("format") == "EbonAesHotkey-v1" and hotkey.get("last_output"):
+            latest = Path(hotkey["last_output"])
+            if not latest.is_absolute():
+                latest = dump / latest
+            name = latest.name
+            valid_name = name == "aes" or (name.startswith("aes_") and name[4:].isdigit() and int(name[4:]) >= 2)
+            if not valid_name or latest.resolve().parent != dump.resolve():
+                raise CodegenError(f"invalid AES listener output directory: {latest}")
+            latest_state = latest / "aes_state.json"
+            if latest_state != state_path:
+                state_path = latest_state
+                last_status = None
+        try:
             state = json.loads(state_path.read_text(encoding="utf-8"))
         except (FileNotFoundError, PermissionError, json.JSONDecodeError):
             # Hotkey mode keeps the scan disarmed until F9, so report the
             # listener state instead of waiting silently for a scan directory.
             if not hotkey_hint:
-                try:
-                    hotkey = json.loads(hotkey_path.read_text(encoding="utf-8"))
-                except (FileNotFoundError, PermissionError, json.JSONDecodeError):
-                    hotkey = None
                 if isinstance(hotkey, dict) and hotkey.get("status") in {"armed", "running"}:
                     where = ("press F9 in the dumper terminal" if hotkey.get("terminal_available")
                              else "no dumper terminal; write aes_hunt.request")
@@ -378,6 +446,8 @@ def wait_for_aes(dump: Path, timeout: float = 180.0) -> dict:
 def wait_for_capture(dump: Path, timeout: float = 300.0) -> dict:
     deadline = time.monotonic() + timeout
     last_status = None
+    sdk_waiting = False
+    sdk_budget_started = False
     while time.monotonic() < deadline:
         try:
             state = json.loads((dump / "dump_state.json").read_text(encoding="utf-8"))
@@ -387,9 +457,27 @@ def wait_for_capture(dump: Path, timeout: float = 300.0) -> dict:
         status = state.get("status")
         if status in {"complete", "complete_with_unresolved", "failed"}:
             return state
-        if status != last_status:
-            print(f"capture: {status} ({state.get('phase', 'initializing')})", flush=True)
-            last_status = status
+        phase = state.get("phase", "initializing")
+        waiting = status == "waiting" and phase == "sdk_hotkey"
+        capture_budget = state.get("capture_timeout_seconds")
+        if (not waiting and not sdk_budget_started and state.get("sdk_validated_subset")
+                and type(capture_budget) is int and 1 <= capture_budget <= 3600):
+            delay = state.get("progress_total", 0) if phase == "capture_delay" else 0
+            if type(delay) is not int or not 0 <= delay <= 300:
+                delay = 0
+            deadline = time.monotonic() + max(timeout, capture_budget + delay + 120)
+            sdk_budget_started = True
+        elif sdk_waiting and not waiting:
+            deadline = time.monotonic() + timeout
+        sdk_waiting = waiting
+        progress = (status, phase)
+        if progress != last_status:
+            hint = ""
+            if waiting:
+                hint = ("; press F5 in the dumper terminal" if state.get("terminal_available")
+                        else f"; create {dump / 'sdk_dump.request'} to start Dump SDK")
+            print(f"capture: {status} ({phase}){hint}", flush=True)
+            last_status = progress
         time.sleep(0.5)
     raise CodegenError(f"capture did not finish within {timeout:g} seconds; inspect {dump / 'dump_state.json'} and the dumper console")
 
@@ -415,6 +503,16 @@ def wait_for_network_version(capture: Path, timeout: float = 600.0) -> dict:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="ebon-dumper")
     commands = parser.add_subparsers(dest="command", required=True)
+    character_request = commands.add_parser("capture-character", help="load, export and audit a table-selected player class using an initialized opt-in dumper")
+    character_request.add_argument("--capture", required=True, help="root directory of the initialized character-loader capture")
+    character_request.add_argument("--source", required=True, help="finished F10 resource directory containing DT_Character")
+    character_request.add_argument("--character", required=True, help="exact character ID, key or generated class path")
+    character_request.add_argument("--timeout", type=float, default=1200)
+    character_audit = commands.add_parser("audit-character", help="check one character's actual configuration and exact replication layouts")
+    character_audit.add_argument("--capture", required=True, action="append", help="finished F10 resources/res_N directory")
+    character_audit.add_argument("--character", required=True, help="DT_Character row ID, blueprint key or exact generated class path")
+    character_audit.add_argument("--out", help="new JSON report outside the source captures")
+    character_audit.add_argument("--skip-network", action="store_true", help="inspect configuration only; result remains incomplete")
     gameplay = commands.add_parser("audit-gameplay", help="audit configuration bodies and byte-validated layout coverage across same-build captures")
     gameplay.add_argument("--capture", required=True, action="append", help="finished F10 resources/res_N directory; repeat to compare captures")
     gameplay.add_argument("--out", help="new JSON report outside all source captures")
@@ -433,6 +531,12 @@ def main(argv: list[str] | None = None) -> int:
     sdk.add_argument("--out", required=True, help="SDK output directory")
     sdk.add_argument("--format", choices=("cpp", "metadata"), default="cpp", help="real C++ declarations (default) or legacy reflection metadata")
     sdk.add_argument("--network-capture", help="separate same-build runtime snapshot for cross-checked network tables; full SDK layouts still use --dump")
+    sdk.add_argument("--extra-network-capture", action="append", help="additional independently validated same-build network scene")
+    sdk.add_argument("--symbol-baseline", help="previous type_map.json; generate migration records and compatible aliases")
+    merge = commands.add_parser("merge-sdk-captures", help="merge verified same-build scenes, recording conflicts and missing scenes")
+    merge.add_argument("--capture", required=True, action="append", help="capture in priority order; last is primary")
+    merge.add_argument("--scene", action="append", help="one label per capture: login, updater, character_creation, gameplay")
+    merge.add_argument("--out", required=True, help="new merged reflection directory")
     version=commands.add_parser("verify-network-version",help="revalidate saved getter/Hello/cache bytes")
     version.add_argument("--capture",required=True)
     version_wait=commands.add_parser("wait-network-version",help="wait for an initialized real UE checksum")
@@ -505,6 +609,29 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        if args.command == "merge-sdk-captures":
+            result=merge_sdk_captures(args.capture,args.out,args.scene)
+            print(json.dumps(result['summary'],ensure_ascii=False,indent=2));return 0
+        if args.command == "capture-character":
+            result = request_character(Path(args.capture), Path(args.source), args.character, timeout=args.timeout)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0 if result["success"] else 1
+        if args.command == "audit-character":
+            sources = [Path(c).resolve() for c in args.capture]
+            output = Path(args.out).resolve() if args.out else None
+            if output and any(output.is_relative_to(c) for c in sources):
+                raise CodegenError("audit output must be outside source captures")
+            if output and output.exists():
+                raise CodegenError(f"refusing to overwrite existing output: {output}")
+            try:
+                result = audit_character_captures(sources, args.character, include_network=not args.skip_network)
+            except (ValueError, KeyError, TypeError) as error:
+                raise CodegenError("invalid character capture: " + str(error)) from error
+            if output:
+                output.parent.mkdir(parents=True, exist_ok=True)
+                _write_new(output, result)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0 if result["success"] else 1
         if args.command == "audit-gameplay":
             sources = [Path(c).resolve() for c in args.capture]
             output = Path(args.out).resolve() if args.out else None
@@ -542,6 +669,8 @@ def main(argv: list[str] | None = None) -> int:
                 raise ContainerError("--oodle-sha256 requires --oodle-dll")
             if args.oodle_dll:
                 decoder = OodleDecoder(Path(args.oodle_dll), args.oodle_sha256)
+            else:
+                decoder = bundled_decoder()
         if args.command == "export-battle-assets":
             result = export_battle_assets(Path(args.capture), Path(args.client), Path(args.out),
                                           key=os.environ.get(args.key_env), decompressor=decoder)
@@ -570,10 +699,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "wait-aes":
             return 0 if wait_for_aes(Path(args.capture), args.seconds).get("success") else 1
         if args.command == "generate-sdk":
-            if args.format == "metadata" and args.network_capture:
-                raise CodegenError("network-capture requires --format cpp")
+            if args.format == "metadata" and (args.network_capture or args.extra_network_capture or args.symbol_baseline):
+                raise CodegenError("network and symbol options require --format cpp")
             if args.format == "cpp":
-                result = generate_cpp_sdk(args.dump, args.out, network_capture=args.network_capture)
+                result = generate_cpp_sdk(args.dump, args.out, network_capture=args.network_capture,
+                                          extra_network_captures=args.extra_network_capture,symbol_baseline=args.symbol_baseline)
             else:
                 result = generate_sdk(args.dump, args.out)
             print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -607,7 +737,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "inject-and-dump":
             capture_name = "injected_" + datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + str(os.getpid())
             capture_out = Path(args.dump_out).resolve() if args.dump_out else PROJECT_ROOT / "out" / "reflection" / capture_name
-            if args.no_sdk:
+            publisher_mode = not args.no_sdk and not args.sdk_out and _uses_sdk_hotkey(Path(args.profile).resolve())
+            if args.no_sdk or publisher_mode:
                 sdk_out = None
             elif args.sdk_out:
                 sdk_out = Path(args.sdk_out).resolve()
@@ -637,6 +768,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.aes_wait_seconds,
                 args.wait_network_version,
                 args.network_version_wait_seconds,
+                use_hotkey_publisher=publisher_mode,
             )
     except (CodegenError, ContainerError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)

@@ -109,12 +109,13 @@ def _decrypt(data: bytes, key: bytes | None) -> bytes:
     return AES.new(key, AES.MODE_ECB).decrypt(data)
 
 
-def _hash_matches(data: bytes, digest: bytes) -> bool:
-    # Some writers include AES zero padding in IndexSize but hash before padding.
+def _hash_matches(data: bytes, digest: bytes, *, encrypted: bool = False) -> bool:
+    # AES alignment padding can contain copied or arbitrary bytes; the stored
+    # digest, rather than the padding value, determines the original length.
     if hashlib.sha1(data).digest() == digest:
         return True
     for pad in range(1, min(15, len(data)) + 1):
-        if data[-pad:] != b"\0" * pad:
+        if not encrypted and data[-pad:] != b"\0" * pad:
             break
         if hashlib.sha1(data[:-pad]).digest() == digest:
             return True
@@ -198,6 +199,9 @@ def _decompress(method: str, data: bytes, expected: int, callback=None) -> bytes
             raise ContainerError("invalid, trailing, or oversized gzip block")
     elif callback is not None:
         output = callback(method, data, expected)
+    elif method.casefold() == "oodle":
+        from .oodle import OpenSourceOodleDecoder
+        output = OpenSourceOodleDecoder()(method, data, expected)
     else:
         raise ContainerError(f"unsupported compression {method!r}; provide a compatible decompressor")
     if len(output) != expected:
@@ -230,7 +234,11 @@ class PakFile:
         self.decompressor = decompressor
         self._entries: list[PakEntry] | None = None
         self.mount_point = ""
+        self._nte_v12 = False
         self.info = self._footer()
+        if self.decompressor is None and 'Oodle' in self._methods:
+            from .oodle import bundled_decoder
+            self.decompressor = bundled_decoder()
 
     def _footer(self) -> dict:
         size = self.path.stat().st_size
@@ -248,7 +256,9 @@ class PakFile:
         encrypted = tail[pos - 1]
         if encrypted not in (0, 1):
             raise ContainerError("invalid Pak encrypted-index flag")
-        if offset < 0 or index_size <= 0 or index_size > MAX_INDEX or offset + index_size > size - footer_size:
+        standard_range = offset >= 0 and offset + index_size <= size - footer_size
+        nte_range = version == 12 and offset > 0 and offset - 1 + index_size <= size - footer_size
+        if index_size <= 0 or index_size > MAX_INDEX or not (standard_range or nte_range):
             raise ContainerError("Pak index range is invalid")
         self._index_hash = tail[pos + 24:pos + 44]
         methods = ["None"]
@@ -259,17 +269,41 @@ class PakFile:
                 raise ContainerError("invalid compression method table") from error
         self._methods = methods
         return {"kind": "pak", "path": str(self.path), "size": size, "version": version,
-                "index_offset": offset, "index_size": index_size, "index_sha1": self._index_hash.hex(),
+                "index_offset": offset, "serialized_index_offset": offset, "index_offset_adjustment": 0,
+                "index_size": index_size, "index_sha1": self._index_hash.hex(), "format": "unverified",
                 "encrypted_index": bool(encrypted), "encryption_key_guid": tail[pos - 17:pos - 1].hex(),
                 "compression_methods": [m for m in methods if m], "status": "encrypted_index" if encrypted and self.key is None else "inventory_only"}
 
     def _index_region(self, offset: int, size: int, digest: bytes) -> bytes:
+        if offset < 0 or size <= 0 or offset + size > self.info["size"] - 221:
+            raise ContainerError("Pak index region extends outside the container")
         data = _read_at(self.path, offset, size)
         if self.info["encrypted_index"]:
             data = _decrypt(data, self.key)
-        if not _hash_matches(data, digest):
+        if not _hash_matches(data, digest, encrypted=self.info["encrypted_index"]):
             raise ContainerError("Pak index SHA-1 mismatch (wrong key, corruption, or custom encryption)")
         return data
+
+    def _primary_index(self) -> bytes:
+        offset = self.info["serialized_index_offset"]
+        positions = [(offset, False)]
+        if self.info["version"] == 12 and offset > 0:
+            positions.append((offset - 1, True))
+        errors = []
+        for position, nte in positions:
+            try:
+                data = self._index_region(position, self.info["index_size"], self._index_hash)
+            except ContainerError as error:
+                errors.append(error)
+                # Missing keys/dependencies do not become format errors.
+                if "SHA-1 mismatch" not in str(error) and "index region extends" not in str(error):
+                    raise
+                continue
+            self._nte_v12 = nte
+            self.info.update(index_offset=position, index_offset_adjustment=-1 if nte else 0,
+                             format="nte_v12" if nte else "standard", index_verified=True)
+            return data
+        raise errors[0]
 
     def _method(self, index: int) -> str:
         if index >= len(self._methods) or not self._methods[index]:
@@ -287,6 +321,9 @@ class PakFile:
         if method != "None":
             for _ in range(reader.count(65535)):
                 begin, end = reader.unpack("q"), reader.unpack("q")
+                if self._nte_v12:
+                    begin ^= 0x76D6DA
+                    end ^= 0x76D6DA
                 blocks.append((begin + offset, end + offset))
         flags, block_size = reader.unpack("B"), reader.unpack("I")
         if flags & ~3:
@@ -327,20 +364,25 @@ class PakFile:
                 raise ContainerError("compressed entry lacks blocks")
             if any(a < entry.offset + entry.header_size or b <= a or b > limit for a, b in entry.blocks):
                 raise ContainerError("compressed block outside Pak data area")
-            if sum(b - a for a, b in entry.blocks) != entry.size:
+            logical = sum(b - a for a, b in entry.blocks)
+            physical = sum((b - a + 15) & ~15 for a, b in entry.blocks) if entry.encrypted else logical
+            if entry.size not in (logical, physical):
                 raise ContainerError("compressed block sizes differ from entry size")
+            if entry.encrypted and any(a + ((b - a + 15) & ~15) > limit for a, b in entry.blocks):
+                raise ContainerError("encrypted compression padding exceeds Pak data area")
         elif entry.offset + entry.header_size + ((entry.size + 15) & ~15 if entry.encrypted else entry.size) > limit:
             raise ContainerError("Pak data outside data area")
 
     def entries(self) -> list[PakEntry]:
         if self._entries is not None:
             return list(self._entries)
-        data = self._index_region(self.info["index_offset"], self.info["index_size"], self._index_hash)
+        data = self._primary_index()
         reader = _Reader(data)
         self.mount_point = reader.string()
         mount = _mount_path(self.mount_point)
         count = reader.count()
         rows = []
+        deleted_paths = []
         if self.info["version"] == 8:
             for _ in range(count):
                 name = _relative_path(reader.string())
@@ -368,6 +410,7 @@ class PakFile:
                     path = _relative_path("/".join(p for p in (mount, prefix.rstrip("/"), name) if p))
                     location = directory.unpack("i")
                     if location == -2147483648:  # deleted file marker
+                        deleted_paths.append(path)
                         continue
                     if location >= 0:
                         row = self._encoded_entry(encoded, location, path)
@@ -377,7 +420,7 @@ class PakFile:
                             raise ContainerError("invalid non-encoded Pak entry reference")
                         row = PakEntry(**{**non_encoded[index].to_dict(), "path": path})
                     rows.append(row)
-                    if len(rows) > count:
+                    if len(rows) + len(deleted_paths) > count:
                         raise ContainerError("directory contains more files than declared")
         seen = set()
         for row in rows:
@@ -386,8 +429,15 @@ class PakFile:
             if identity in seen:
                 raise ContainerError("duplicate/case-colliding Pak paths")
             seen.add(identity)
+        for path in deleted_paths:
+            identity = path.casefold()
+            if identity in seen:
+                raise ContainerError("duplicate/case-colliding Pak paths")
+            seen.add(identity)
         self._entries = rows
-        self.info.update(status="index_read", mount_point=self.mount_point, declared_entries=count, listed_entries=len(rows))
+        self.info.update(status="index_read", mount_point=self.mount_point, declared_entries=count, listed_entries=len(rows),
+                         deleted_entries=len(deleted_paths), deleted_paths=deleted_paths,
+                         directory_complete=len(rows) + len(deleted_paths) == count)
         return list(rows)
 
     def inventory(self) -> list[dict]:
@@ -440,6 +490,9 @@ class UtocFile:
         self.key, self.decompressor = _key_bytes(key), decompressor
         self._data = _read_at(self.path, 0, self.path.stat().st_size)
         self.info = self._header()
+        if self.decompressor is None and 'Oodle' in self._methods:
+            from .oodle import bundled_decoder
+            self.decompressor = bundled_decoder()
 
     def _header(self) -> dict:
         reader = _Reader(self._data)

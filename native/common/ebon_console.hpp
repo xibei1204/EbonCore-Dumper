@@ -39,7 +39,16 @@ inline bool initialize(const wchar_t* title = L"EbonCore Dumper") {
     }
 
     CONSOLE_SCREEN_BUFFER_INFO info{};
-    if (GetConsoleScreenBufferInfo(output, &info)) g_defaultAttributes = info.wAttributes;
+    if (GetConsoleScreenBufferInfo(output, &info)) {
+        g_defaultAttributes = info.wAttributes;
+        // Keep scrollback even when the host defaults to a buffer only as tall
+        // as the window. Preserve larger user-configured buffers.
+        if (info.dwSize.Y < 10000) {
+            COORD size = info.dwSize;
+            size.Y = 10000;
+            SetConsoleScreenBufferSize(output, size);
+        }
+    }
     g_output = output;
     ReleaseSRWLockExclusive(&g_lock);
     return true;
@@ -49,10 +58,11 @@ inline bool initialize(const wchar_t* title = L"EbonCore Dumper") {
 // game changes the window picked by some platform login SDKs.
 inline bool startViewer(const std::filesystem::path& executable,DWORD targetPid,
                         const std::filesystem::path& requestDir=std::filesystem::path(),
-                        DWORD* viewerPid=nullptr) {
+                        DWORD* viewerPid=nullptr,const std::filesystem::path& sdkOutput=std::filesystem::path()) {
     std::wstring command=L"\""+executable.wstring()+L"\" --log \""+g_logPath+
                          L"\" --pid "+std::to_wstring(targetPid);
     if(!requestDir.empty())command+=L" --request-dir \""+requestDir.wstring()+L"\"";
+    if(!sdkOutput.empty())command+=L" --sdk-output \""+sdkOutput.wstring()+L"\"";
     STARTUPINFOW startup{};
     startup.cb=sizeof(startup);
     startup.dwFlags=STARTF_USESHOWWINDOW;

@@ -38,44 +38,62 @@ set "EBON_CFLAGS=/nologo /O2 /std:c++17 /EHsc /W4 /utf-8 /DUNICODE /D_UNICODE /I
 set "EBON_OBJ=/Fo:%EBON_BUILD_DIR%\obj\"
 set "EBON_OUT=%EBON_BUILD_DIR%"
 
-echo [1/10] EbonLogConsole.exe
+echo [1/13] EbonLogConsole.exe
 cl %EBON_CFLAGS% %EBON_OBJ%EbonLogConsole.obj native\dumper\EbonLogConsole.cpp /Fe:%EBON_OUT%\EbonLogConsole.exe
 if errorlevel 1 goto :failed
 
-echo [2/10] EbonDumper.exe
+echo [2/13] EbonDumper.exe
 cl %EBON_CFLAGS% %EBON_OBJ%EbonDumper.obj native\dumper\EbonDumper.cpp /Fe:%EBON_OUT%\EbonDumper.exe bcrypt.lib advapi32.lib shell32.lib psapi.lib
 if errorlevel 1 goto :failed
 
-echo [3/10] EbonDumper.dll
+echo [3/13] EbonDumper.dll
 cl %EBON_CFLAGS% /DEBON_DLL /LD %EBON_OBJ%EbonDumperDll.obj native\dumper\EbonDumper.cpp /Fe:%EBON_OUT%\EbonDumper.dll bcrypt.lib advapi32.lib shell32.lib psapi.lib
 if errorlevel 1 goto :failed
 
-echo [4/10] EbonReflectionSelfTest.exe
+echo [4/13] EbonReflectionSelfTest.exe
 cl %EBON_CFLAGS% %EBON_OBJ%EbonReflectionSelfTest.obj native\sdk\EbonReflectionSelfTest.cpp /Fe:%EBON_OUT%\EbonReflectionSelfTest.exe
 if errorlevel 1 goto :failed
 
-echo [5/10] EbonDllSelfTest.exe
+echo [5/13] EbonDllSelfTest.exe
 cl %EBON_CFLAGS% %EBON_OBJ%EbonDllSelfTest.obj native\sdk\EbonDllSelfTest.cpp /Fe:%EBON_OUT%\EbonDllSelfTest.exe
 if errorlevel 1 goto :failed
 
-echo [6/10] EbonDebugInject.exe
+echo [6/13] EbonDebugInject.exe
 cl %EBON_CFLAGS% %EBON_OBJ%EbonDebugInject.obj native\injector\EbonDebugInject.cpp /Fe:%EBON_OUT%\EbonDebugInject.exe shell32.lib psapi.lib advapi32.lib
 if errorlevel 1 goto :failed
 
-echo [7/10] EbonAesFinder.exe
+echo [7/13] EbonAesFinder.exe
 cl %EBON_CFLAGS% %EBON_OBJ%EbonAesFinder.obj native\aes\aes_finder.cpp /Fe:%EBON_OUT%\EbonAesFinder.exe
 if errorlevel 1 goto :failed
 
-echo [8/10] EbonAesScan.exe
+echo [8/13] EbonAesScan.exe
 cl %EBON_CFLAGS% %EBON_OBJ%EbonAesScan.obj native\aes\aes_mem_scanner.cpp /Fe:%EBON_OUT%\EbonAesScan.exe
 if errorlevel 1 goto :failed
 
-echo [9/10] EbonAesSelfTest.exe
+echo [9/13] EbonAesSelfTest.exe
 cl %EBON_CFLAGS% %EBON_OBJ%EbonAesSelfTest.obj native\aes\test_aes.cpp /Fe:%EBON_OUT%\EbonAesSelfTest.exe
 if errorlevel 1 goto :failed
 
-echo [10/10] EbonResourceSelfTest.exe
+echo [10/13] EbonResourceSelfTest.exe
 cl %EBON_CFLAGS% %EBON_OBJ%EbonResourceSelfTest.obj native\sdk\EbonResourceSelfTest.cpp /Fe:%EBON_OUT%\EbonResourceSelfTest.exe
+if errorlevel 1 goto :failed
+
+echo [11/13] EbonFriendRpcSelfTest.exe
+cl %EBON_CFLAGS% %EBON_OBJ%EbonFriendRpcSelfTest.obj native\sdk\EbonFriendRpcSelfTest.cpp /Fe:%EBON_OUT%\EbonFriendRpcSelfTest.exe
+if errorlevel 1 goto :failed
+
+echo [12/13] EbonCharacterLoaderSelfTest.exe
+cl %EBON_CFLAGS% %EBON_OBJ%EbonCharacterLoaderSelfTest.obj native\sdk\EbonCharacterLoaderSelfTest.cpp /Fe:%EBON_OUT%\EbonCharacterLoaderSelfTest.exe
+if errorlevel 1 goto :failed
+
+echo [13/13] EbonOodleDecode.exe
+cl %EBON_CFLAGS% /DNDEBUG /Dmain=ooz_upstream_main /FIsys/stat.h /c /Fo:%EBON_BUILD_DIR%\obj\ooz_kraken.obj third_party\ooz\kraken.cpp
+if errorlevel 1 goto :failed
+cl %EBON_CFLAGS% /DNDEBUG /c /Fo:%EBON_BUILD_DIR%\obj\ooz_lzna.obj third_party\ooz\lzna.cpp
+if errorlevel 1 goto :failed
+cl %EBON_CFLAGS% /DNDEBUG /c /Fo:%EBON_BUILD_DIR%\obj\ooz_bitknit.obj third_party\ooz\bitknit.cpp
+if errorlevel 1 goto :failed
+cl %EBON_CFLAGS% %EBON_OBJ%EbonOodleDecode.obj native\oodle\EbonOodleDecode.cpp %EBON_BUILD_DIR%\obj\ooz_kraken.obj %EBON_BUILD_DIR%\obj\ooz_lzna.obj %EBON_BUILD_DIR%\obj\ooz_bitknit.obj /Fe:%EBON_OUT%\EbonOodleDecode.exe
 if errorlevel 1 goto :failed
 
 echo [ok] targets written to %EBON_BUILD_DIR%

@@ -163,6 +163,8 @@ def _validate_dump(source: Path) -> tuple[dict[str, Any], list[dict[str, Any]], 
     seen: set[str] = set()
     for index, owner in enumerate(types):
         label = f"types.jsonl[{index}]"
+        if state.get("sdk_validated_subset") and owner.get("complete") is False:
+            raise CodegenError(f"{label} reports incomplete type metadata")
         path = _safe_identifier(owner.get("path"), f"{label}.path")
         name = _safe_identifier(owner.get("name"), f"{label}.name")
         kind = str(owner.get("kind") or "")

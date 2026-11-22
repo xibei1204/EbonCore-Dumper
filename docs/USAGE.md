@@ -11,8 +11,8 @@
 - **反射采集**：对象数组、UClass/UStruct、属性、枚举、函数参数区与局部变量区、RPC 与复制元数据。
 - **两种采集路径**：注入 DLL 在反作弊初始化前于进程内采集；或在无保护环境下用外部 `ReadProcessMemory` 采集。
 - **SDK 生成**：真实 C++ 声明、继承、显式填充、布尔位访问器、`sizeof`/偏移静态断言，以及 `Network.hpp` 网络表查询接口。
-- **AES 索引密钥搜索**：解析 Pak footer，仅接受完整索引 SHA-1 匹配的候选；支持进程内、外部只读扫描与离线文件扫描。
-- **资源容器**：`dump-res` 批量保全 loose/Pak/IoStore，覆盖脚本、地图包、表、协议描述、热更与资产依赖文件；可显式接入本地 Oodle DLL。
+- **AES 索引密钥搜索**：解析 Pak footer 与 IoStore TOC；验证完整 Pak 索引 SHA-1 或完整 IoStore 目录图；支持指令常量重建、进程内、外部只读扫描与离线文件扫描。
+- **资源容器**：`dump-res` 批量保全 loose/Pak/IoStore，覆盖脚本、地图包、表、协议描述、热更与资产依赖文件；自动使用捆绑的本地 Oodle 解码器，也支持显式 DLL。
 - **F10 资源值导出**：角色养成、抽卡、任务、文本、皮肤，以及已加载 World/Level/Actor/组件、游戏类默认值、反射脚本资产和引用关系，支持重复采集。
 - **可验证性**：四个原生自测程序、Python 回归测试与全量 SDK 编译检查。
 
@@ -57,6 +57,7 @@
 | `EbonAesScan.exe` | 外部只读进程内存扫描 |
 | `EbonAesFinder.exe` | 离线镜像/文件扫描 |
 | `EbonAesSelfTest.exe` | AES/SHA-1 向量与边界自测 |
+| `EbonOodleDecode.exe` | 独立进程中的本地 Oodle 解码器 |
 
 ### 2. 注入采集（推荐，反作弊接管前）
 
@@ -68,9 +69,20 @@ python tools/ebon_cli.py inject-and-dump `
 
 - 注入器以 1 ms 轮询目标进程，确认模块数达到 `--min-modules`（默认 24）且 ACE 尚未装载后，用 `CreateRemoteThread` + `LoadLibraryW` 注入。
 - 注入成功后由 DLL 拉起独立 `EbonLogConsole.exe` 显示彩色日志，并追加写入 `out/ebon_inject.log`；关闭终端不影响游戏。
-- 采集线程等待注册稳定后采集，写出终态后 Python 侧再生成 SDK。`--no-sdk` 只保留 JSONL。
+- 默认 `sdk_hotkey=1`：注入后在本次 Dumper 终端里按 **F5** 开始 Dump SDK，采集线程等待注册稳定后采集，写出终态后 Python 侧再生成 SDK。`--no-sdk` 只保留 JSONL。
 - 错失窗口会提示 `SKIP: ACE already loaded, window missed` 并安全跳过。
 - `--capture-delay 0..300` 可延后采集，用于等待复制表初始化。
+
+F5 由日志终端读取自己的控制台输入队列，写入 `<采集目录>/sdk_dump.request`；无终端时可创建同名空文件触发。等待 F5 不占用 DLL 的反射采集超时，采集延迟也从触发后开始。Python 启动流程最多等待首次触发 300 秒（另加配置的采集延迟）；收到 F5 采集进度后按照 DLL 发布的 `capture_timeout_seconds` 重新计算采集超时，并留出 120 秒写出结果的余量。
+
+首次 F5 保存反射快照到采集根目录，后续按键保存到 `sdk_snapshot_1/`、`sdk_snapshot_2/`…，原始成功快照不被覆盖。采集中重复按键会被忽略，长按只触发一次。`sdk_hotkey_state.json` 记录监听状态、运行次数、最近输出与成功状态；首次失败后保留 `dump_state.failed_N.json`，可在同一会话再次按 F5 重试。
+
+标准 profile 的 F5 成功快照由日志终端自动启动的独立 Python 生成器转换为 C++ SDK 正文，固定写到 **`G:\EbonCore-Dumper\out\sdk\CppSDK`**（`sdk_output` 可配置）。其中包含 `SDK.hpp`、`Types.hpp`、`Packages/*.hpp`、`Runtime.cpp` 等真实代码文件。生成成功后才替换目标目录，上一份保留为同级 `CppSDK.previous_<时间>_<ID>`；`sdk_body_state.json` 记录正文生成结果。该流程不依赖注入启动脚本继续运行，`--no-sdk` 不关闭终端 F5 的独立正文生成器。
+默认 `inject-and-dump` 在 F5 模式下等待这个独立生成器的结果，不再额外生成一份 `cpp_injected_*`。显式传入 `--sdk-out` 时仍按指定目录执行生成；`sdk_hotkey=0` 的自动采集保留原有生成路径。
+
+F5 使用独立的 `sdk_timeout_seconds=600` 采集预算。每个类型读取前刷新元数据缓存，读取后复核类型头；已销毁、已替换、属性不完整以及依赖未验证基类的类型被剔除，具体路径记录在快照与正文清单的 `excluded_types` 中。默认最多允许 5% 的类型被剔除，超限或全局布局失败仍报告失败。普通自动采集和资源导出继续使用各自的校验流程。
+
+`sdk_hotkey=0` 恢复注入后自动采集，专用 gameplay/friend/character profile 使用此设置以自动初始化采样器或角色加载器。标准模式的 F8/F10 就绪提示在首次 F5 采集完成后出现；F9 AES 扫描独立运行。`--wait-aes --no-sdk` 的 AES 专用启动流程直接等待 F9 扫描结果，无需先按 F5。
 
 ### 3. 外部只读采集（无保护/离线环境）
 
@@ -127,6 +139,12 @@ SDK 目录主要内容：`SDK.hpp`、`Types.hpp`、`Enums.hpp`、`Basic.hpp`、`
 ### 5. AES 索引密钥搜索
 
 注入后 AES 不会自动开扫：它只在**本次采集的 Dumper 终端窗口**里按键才启动。终端自己读取自己的控制台输入队列（`CONIN$`），一旦收到 F9 就在采集目录写入 `aes_hunt.request`，游戏进程侧的监听线程消费该请求后才启动扫描。因此快捷键只存在于那个终端窗口内，游戏窗口或其他程序的按键不会触发。
+
+`run_injector.bat` 会先检查 `build-aes` 的原生程序；产物缺失或早于原生源码（含头文件）时自动重建。首先检查模块代码中的八段 32 位栈写入指令，重建没有连续存储的 Key（`instruction_keys` / `immediate32`）；随后检查模块数据区与私有内存中的文本、对齐二进制候选，最后做非对齐搜索。读取前复查页面状态；`bytes_unread`、`range_address`、`region_index` 与 `completed_sweeps` 记录未读字节、扫描位置和实际完成轮数。`wait-aes` 跟随监听器的 `last_output`，重复扫描会读取最新 `aes_N`，不会直接返回第一次扫描的旧终态。
+
+样本目录同时发现 `.pak` 和 `.utoc`，零 GUID 逐容器保留。Pak 的完整索引 SHA-1 支持最多 15 字节 AES 对齐填充前的原始长度，不要求填充值为零；`verification_method=pak_index_sha1`。IoStore 目录没有存储摘要，因此验证完整字符串表、目录/文件连通性、循环、块引用和末尾长度；`verification_method=io_store_directory_structure`，不代表签名或资源块哈希已验证。Key 的成功状态必须为 `verified`，并与 `aes_key.txt` 一致。
+
+模块可写区、模块只读数据区先于堆扫描。`aes_snapshot_module=1` 时，进程内扫描超时后会先进入 `collecting_evidence`，在读取预算 15 秒、模块上限 512 MiB 内保存 `module_memory.bin` 与 `module_memory.json`，再发布 `timed_out`。状态中的 `module_snapshot` 指向快照说明；快照按 RVA 排列，未读字节为零占位，实际读取范围由 `captured_ranges` 标明，不能将其当作完整解包 EXE。`aes_snapshot_module=0` 关闭这项失败证据采集。
 
 ```powershell
 .\run_injector.bat    # 注入采集；等待后在 Dumper 终端里按 F9
@@ -230,7 +248,9 @@ python tools/ebon_cli.py extract-pak `
   --include '*.uasset' --include '*.uexp'
 ```
 
-`extract-pak` 默认上限 1,000 个文件、单文件 512 MiB、总量 2 GiB。没有兼容解压器时，Oodle 条目逐项报告为未导出；可用 `--oodle-dll` 显式提供可信本地解码 DLL，`--oodle-sha256` 在加载前校验文件哈希。IoStore chunk 是原始块，不重建 cooked package。
+`extract-pak` 默认上限 1,000 个文件、单文件 512 MiB、总量 2 GiB。构建后自动使用 `build/EbonOodleDecode.exe` 解码 Oodle；可用 `--oodle-dll` 提供本地兼容 DLL，`--oodle-sha256` 在加载前校验哈希。解码器来源记录在状态文件。IoStore chunk 是原始块，不重建 cooked package。
+
+NTE v12 的主索引位置经完整 SHA-1 校验选择：先尝试标准位置，再尝试序列化位置减 1。`format=nte_v12`、`serialized_index_offset`、`index_offset_adjustment` 保留检测结果。目录索引单独验证 SHA-1，删除记录计入 `deleted_entries`；`directory_complete` 表示有效条目与删除条目的总数符合声明。此客户端的 14 个 Pak 已完整枚举并完成实际资源提取验证，见 [Pak 修复](PAK_REPAIR_2026-11-22.md)。
 
 ### 8. 批量 Dump 地图、Lua、热更与私服研究资源
 
@@ -252,7 +272,7 @@ python tools/ebon_cli.py dump-res `
 | `--max-file-mb` / `--max-total-mb` | 512 / 32,768 | 单文件 / 全局 payload 预算 |
 | `--max-manifest-mb` | 512 | 清单和分类索引的独立预算 |
 | `--timeout-seconds` | 1,800 | 扫描和读取总期限 |
-| `--oodle-dll` / `--oodle-sha256` | 无 | 显式加载本地可信 Windows x64 DLL；记录哈希，不自动下载 |
+| `--oodle-dll` / `--oodle-sha256` | 捆绑解码器 | 可选本地 Windows x64 DLL；显式提供时记录并核对哈希 |
 
 样本历史盘点超过 750,000 个 chunk，默认预算不能覆盖全部。大批量运行前确认空间，按需要提高上述上限。触及文件/大小预算仍记录后续条目的 `blocked` 状态；超时或清单预算耗尽写出 `failed`。
 
@@ -319,8 +339,8 @@ EbonCore-Dumper/
 ## 已知边界
 
 - 反射只覆盖当次已加载的对象，不代表资源、协议或服务端功能完整。
-- 不附带 Oodle DLL；可显式接入本地兼容解码器，真实目标块兼容性需要验证。尚不重建 IoStore cooked package。
-- AES 结果只证明状态中 `verified_sample` 指向的 Pak/GUID，不覆盖其他容器或自定义加密。
+- 捆绑 ooz 解码器已验证当前客户端的实际 Oodle 块；也支持显式本地 DLL。IoStore cooked package 重建仍未实现。
+- AES 结果只证明状态中 `verified_sample` 指向的容器/GUID；验证方式见 `verification_method`，不覆盖其他容器或自定义加密。
 - SDK 的成员偏移与尺寸经编译断言校验；未采集到原生对齐值的类型使用显式填充，不等同于完整原生 ABI 还原。
 - 654 个复用父类尾部填充的字段通过 `Get_字段()` 访问器暴露，38 个少见语义字段仍列为未确认。
 - 网络映射当前为 `observed_partial`、`packet_mapping_verified=false`，RPCId 与 FieldNetIndex、RepIndex 与 FRepLayout handle 不可互换。

@@ -50,8 +50,12 @@ int wmain(int argc,wchar_t** argv) {
     const bool delayed=std::wstring(argv[1])==L"delayed";
     const bool aes=std::wstring(argv[1])==L"aes";
     const bool aesError=std::wstring(argv[1])==L"aes_error";
-    const bool aesHotkey=std::wstring(argv[1])==L"aes_hotkey";
+    const bool aesIoStore=std::wstring(argv[1])==L"aes_hotkey_iostore";
+    const bool aesVerified=std::wstring(argv[1])==L"aes_hotkey_verified"||aesIoStore;
+    const bool aesHotkey=std::wstring(argv[1])==L"aes_hotkey" || aesVerified;
     const bool resources=std::wstring(argv[1])==L"resources";
+    const bool sdkRetry=std::wstring(argv[1])==L"sdk_hotkey_retry";
+    const bool sdkHotkey=std::wstring(argv[1])==L"sdk_hotkey"||sdkRetry;
     const auto dll=std::filesystem::absolute(argv[2]);
     const auto output=std::filesystem::absolute(argv[3]);
     const auto profile=dll.parent_path()/"fixture.ini";
@@ -61,18 +65,21 @@ int wmain(int argc,wchar_t** argv) {
     std::vector<std::uint8_t> storage(0x80000);
     if(!missing)makeFixture(storage);
     if(delayed)put(reinterpret_cast<std::uint64_t>(storage.data())+0x40500+80,std::uint64_t(0));
+    if(sdkRetry)put(reinterpret_cast<std::uint64_t>(storage.data())+0x40500+80,std::uint64_t(0));
     wchar_t self[32768]{};
     GetModuleFileNameW(nullptr,self,32768);
     const auto module=std::filesystem::path(self).filename().u8string();
-    const auto pak=aesError?dll.parent_path()/"fixture.pak":dll.parent_path()/"paks"/"fixture.pak";
+    const auto pak=aesError?dll.parent_path()/"fixture.pak":dll.parent_path()/"paks"/(aesIoStore?"fixture.utoc":"fixture.pak");
     // aes_hotkey=1 leaves the scan disarmed until the hotkey request; every other
     // mode keeps the immediate start so the reflection timing assertions hold.
     ebon::save(profile,std::string("aes_hunt=")+(aes||aesError||aesHotkey?"1":"0")+
+               "\nsdk_hotkey="+(sdkHotkey?"1":"0")+
+               "\nsdk_timeout_seconds=2"+
                "\naes_hotkey="+(aesHotkey?"1":"0")+
                "\naes_timeout_seconds=5\naes_retry_ms=25\naes_pak="+
                pak.u8string()+"\nmodule="+module+"\nclient_root="+(dll.parent_path()/"client").u8string()+"\n");
     ebon::save(dll.parent_path()/"EbonDumper.ini",
-               "auto_dump=1\nconsole=0\nsettle_seconds=0\nmax_wait_seconds=2\nprofile="+profile.u8string()+
+               "auto_dump=1\nconsole=0\nsettle_seconds=0\nmax_wait_seconds=2\ncapture_delay_seconds="+std::string(sdkHotkey?"1":"0")+"\nprofile="+profile.u8string()+
                "\noutput="+output.u8string()+"\nlog="+log.u8string()+"\n");
     SetEnvironmentVariableW(L"EBON_AUTO_DUMP",nullptr);
     const auto start=GetTickCount64();
@@ -82,14 +89,65 @@ int wmain(int argc,wchar_t** argv) {
     bool independentAes=false;
     bool hotkeyRequested=false,hotkeyStarted=false;
     unsigned resourceRequests=0;
+    unsigned sdkRequests=0;
+    ULONGLONG sdkArmedAt=0;
+    bool duplicateSdkRequest=false;
+    bool sdkRetried=false;
+    std::string firstSdkTypes;
     while(GetTickCount64()-start<10000){
         // The request file is the terminal-free equivalent of the F9 press.
-        if(aesHotkey&&!hotkeyRequested&&std::filesystem::is_directory(output)){
+        if(aesHotkey&&!hotkeyRequested&&std::filesystem::exists(output/"aes_hotkey_state.json")){
+            if(std::filesystem::exists(output/"aes")){std::cerr<<"AES started before its request\n";return 9;}
+            if(aesVerified) {
+                std::ifstream keyFile(dll.parent_path()/"fixture-key.bin",std::ios::binary);
+                if(!keyFile.read(reinterpret_cast<char*>(storage.data()+0x70007),32))return 10;
+            }
             ebon::save(output/"aes_hunt.request","");hotkeyRequested=true;
         }
         std::ifstream input(output/"dump_state.json",std::ios::binary);
         const std::string state((std::istreambuf_iterator<char>(input)),{});
         input.close();
+        if(sdkHotkey){
+            std::ifstream listenerFile(output/"sdk_hotkey_state.json",std::ios::binary);
+            const std::string listener((std::istreambuf_iterator<char>(listenerFile)),{});
+            listenerFile.close();
+            if(sdkRetry&&!sdkRetried&&std::filesystem::exists(output/"dump_state.failed_1.json")&&
+               listener.find("\"status\":\"armed\"")!=listener.npos&&state.find("\"phase\":\"sdk_hotkey\"")!=state.npos){
+                put(reinterpret_cast<std::uint64_t>(storage.data())+0x40500+80,reinterpret_cast<std::uint64_t>(storage.data())+0x31000);
+                sdkRetried=true;sdkRequests=0;sdkArmedAt=GetTickCount64()-2500;
+            }
+            if(!sdkRequests&&listener.find("\"status\":\"armed\"")!=listener.npos){
+                if(!sdkArmedAt)sdkArmedAt=GetTickCount64();
+                if((!sdkRetried&&std::filesystem::exists(output/"objects.jsonl"))||state.find("\"phase\":\"sdk_hotkey\"")==state.npos){
+                    std::cerr<<"SDK started before F5\n";return 11;
+                }
+                // Waiting for F5 must not consume the two-second capture deadline.
+                if(GetTickCount64()-sdkArmedAt>=2500){ebon::save(output/"sdk_dump.request","");sdkRequests=1;}
+            }
+            if(sdkRequests==1&&!duplicateSdkRequest&&listener.find("\"status\":\"running\"")!=listener.npos){
+                ebon::save(output/"sdk_dump.request","");duplicateSdkRequest=true;
+            }
+            if(sdkRequests==1&&state.find("\"success\":true")!=state.npos&&listener.find("\"last_success\":true")!=listener.npos){
+                if(std::filesystem::exists(output/"sdk_snapshot_1")){std::cerr<<"SDK duplicate request was not ignored\n";return 12;}
+                std::ifstream typesFile(output/"types.jsonl",std::ios::binary);
+                firstSdkTypes.assign(std::istreambuf_iterator<char>(typesFile),{});
+                // The second capture must read fresh metadata and preserve the first.
+                put(reinterpret_cast<std::uint64_t>(storage.data())+0x31000+76,std::int32_t(4));
+                ebon::save(output/"sdk_dump.request","");sdkRequests=2;
+            }
+            if(sdkRequests==2){
+                std::ifstream nextStateFile(output/"sdk_snapshot_1"/"dump_state.json",std::ios::binary);
+                const std::string nextState((std::istreambuf_iterator<char>(nextStateFile)),{});
+                nextStateFile.close();
+                if(nextState.find("\"success\":true")==nextState.npos||listener.find("\"last_success\":true")==listener.npos||
+                   listener.find(sdkRetry?"\"runs\":3":"\"runs\":2")==listener.npos){Sleep(10);continue;}
+                std::ifstream originalFile(output/"types.jsonl",std::ios::binary),nextFile(output/"sdk_snapshot_1"/"types.jsonl",std::ios::binary);
+                const std::string original((std::istreambuf_iterator<char>(originalFile)),{}),next((std::istreambuf_iterator<char>(nextFile)),{});
+                if(original!=firstSdkTypes||next.find("\"offset\":4")==next.npos||std::filesystem::exists(output/"sdk_dump.request")){
+                    std::cerr<<"SDK repeat did not preserve or refresh metadata\n";return 13;
+                }
+            }else{Sleep(10);continue;}
+        }
         if(state.find("\"success\":false")!=state.npos){sawProgress=true;if(!firstProgress)firstProgress=GetTickCount64();}
         std::ifstream logs(log,std::ios::binary);
         const std::string text((std::istreambuf_iterator<char>(logs)),{});
@@ -119,7 +177,7 @@ int wmain(int argc,wchar_t** argv) {
                     if(aesState.find("\"status\":\"error\"")==aesState.npos){Sleep(10);continue;}
                 }else if(aesHotkey){
                     // Nothing may start the scan except the hotkey listener itself.
-                    if(aesState.find("\"status\":\"timed_out\"")==aesState.npos){Sleep(10);continue;}
+                    if(aesState.find(aesVerified?"\"status\":\"verified\"":"\"status\":\"timed_out\"")==aesState.npos){Sleep(10);continue;}
                     hotkeyStarted=true;
                 }else{
                     if(aesState.find("\"status\":\"scanning\"")!=aesState.npos)independentAes=true;

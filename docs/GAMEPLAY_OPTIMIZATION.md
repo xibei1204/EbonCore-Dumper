@@ -5,11 +5,13 @@
 ## 本次调整
 
 - F10 默认先采集反射元数据和资源正文，再扫描网络。网络阶段刷新内存页并复用本次类型清单，避免重新导出整个 SDK；网络耗时使用单独预算。`resource_defer_network=0` 恢复原先顺序。
-- 菜单、地图和战斗分别使用 `resource_feature_max_objects` / `resource_map_max_objects` / `resource_battle_max_objects`，默认各 4096。MiniMapDataAsset（包括保存硬引用的 CDO）作为地图采集入口；加载的 `MiniMapFogBlockData` 表行会同时写出原始行名和 `map_block_id`。
+- 菜单、地图和战斗分别使用 `resource_feature_max_objects` / `resource_map_max_objects` / `resource_battle_max_objects`，默认各 4096。地图阶段先直接采集 `/Game/DataTable/MiniMap/` 下已加载的 DataTable，再沿 MiniMapDataAsset（包括保存硬引用的 CDO）追踪依赖；后续阶段的字节预算耗尽不会删除已完成的地图表正文。`MiniMapFogBlockData` 行会写出原始行名和 `map_block_id`，其他行类型不附加未经验证的 ID 语义。
+- 玩家角色在其他阶段之前使用独立 `resource_character_max_objects` 名额（默认 1024，gameplay profile 为 2048）。先为全部已加载的玩家实例和 CDO 预留根对象位置，再跟随依赖，避免第一个角色的网格/动画挤掉其他角色。仍共用总时间、值数量和输出字节预算；已加载根对象超过自身名额时明确记录截断。
 - 硬引用、软引用和生成类的 CDO 继续递归采集；依赖即使没有 Skill/Character 等命名，也保留在战斗报告中。`resource_dependency_depth` 默认 8，范围 1..64。
 - JSONL 按文件和状态边界刷盘，取消每行强制刷盘。完成状态发布前检查缓冲输出，失败时保留已完成正文。
 - 网络类层级查询使用路径索引，同一次扫描只验证同一候选起点一次。
 - `network_capture_graph=0` 保留活动根对象以及通过交叉验证的 cache/header/Parents/Cmds/field 字节；中间图节点只参与遍历。证据预算不再被无关节点消耗，离线验收直接重新验证保存的记录与字节。旧版完整图采集仍可用 `network_capture_graph=1`。
+- F8 可开启 30 秒的 `ProcessEvent` 参数样本窗口；仅在匹配 HTGame 哈希、反射参数结构以及已绑定 vtable 槽位/RVA 校验后安装。样本数量和每条 RPC 的 `BinaryData` 总长度有界。输出是进程内参数，不能当作线路包或已验证序列化格式。
 
 专用配置 [nte-ue5-gameplay.ini](../profiles/nte-ue5-gameplay.ini) 开启以上路线，启动时只采集反射，F10 补采网络。它仍绑定原有客户端 SHA-256；客户端升级需要重新验证配置。没有跨进程保存或复用 UObject 地址、值或网络 handle。
 
@@ -35,7 +37,9 @@ python tools/ebon_cli.py audit-gameplay `
 
 完整的已验证 Parents/Cmds、缓存字段和 handle 记录保存在报告的 `captures[].network.validated_records` 中，保留每个来源地址与原始字节；`configurations[].file` 相对于对应 capture，是原始配置正文的位置。
 
-`feature_exports/priority_capture.json` 记录菜单/地图/战斗候选数量、访问数量、名额及深度截断。`capture_pipeline.json` 记录元数据、资源、网络各阶段耗时。`resource_state.json` 在延迟网络阶段结束前保持 collecting；网络失败不会删除已保存正文。
+`feature_exports/priority_capture.json` 记录地图/菜单/战斗候选数量、访问数量、名额及深度截断。地图阶段先于菜单阶段执行。`capture_pipeline.json` 记录元数据、资源、网络各阶段耗时。`resource_state.json` 在延迟网络阶段结束前保持 collecting；网络失败不会删除已保存正文。
+
+角色阶段另记录在 `priority_capture.json.characters`。针对单个角色的技能列表与布局缺项，使用 [audit-character](CHARACTER_CAPTURE_2026-11-21.md)；模型骨架和角色表项不能替代生成类或其 CDO。
 
 ## 网络预算
 

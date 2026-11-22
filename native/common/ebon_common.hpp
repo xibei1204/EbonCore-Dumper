@@ -82,6 +82,7 @@ public:
     virtual bool copy(std::uint64_t address,void* out,std::size_t size)const=0;
     virtual std::vector<Region> regions(const Module& module)const=0;
     virtual bool executable(std::uint64_t address)const=0;
+    virtual void refresh()const {}
     template<class T> bool get(std::uint64_t a,T& out)const {return copy(a,&out,sizeof(out));}
 };
 // Copy each metadata page once per capture pass. All reads still go through
@@ -95,6 +96,7 @@ class SnapshotReader final:public MemoryReader {
 public:
     explicit SnapshotReader(const MemoryReader& source):source_(source){}
     void reset(){pages_.clear();executable_.clear();}
+    void refresh()const override {pages_.clear();executable_.clear();}
     bool copy(std::uint64_t address,void* output,std::size_t size)const override {
         if(!output||!size||address<0x10000||address+size<address)return false;
         if(size>pageSize)return source_.copy(address,output,size);

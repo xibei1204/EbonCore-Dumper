@@ -13,6 +13,7 @@ import re
 
 from .sdk_codegen import CodegenError, _cpp_string, _validate_dump, _jsonl
 from .network_codegen import generate_network_files
+from .reflection_evidence import replay_alignments, replay_property_targets
 
 KEYWORDS = set("alignas alignof and asm auto bitand bitor bool break case catch char char16_t char32_t class compl concept const consteval constexpr constinit const_cast continue co_await co_return co_yield decltype default delete do double dynamic_cast else enum explicit export extern false float for friend goto if inline int long mutable namespace new noexcept not nullptr operator or private protected public register reinterpret_cast requires return short signed sizeof static static_assert static_cast struct switch template this thread_local throw true try typedef typeid typename union unsigned using virtual void volatile wchar_t while xor final override".split())
 KEYWORDS.update('NULL TRUE FALSE ERROR IN OUT OPTIONAL min max GetObject GetClassName SendMessage CreateEvent DeleteFile DrawText GetCurrentTime GetMessage MemoryBarrier'.split())
@@ -90,14 +91,29 @@ static_assert(sizeof(FName)==8 && sizeof(TArray<int>)==16);
 namespace Runtime {
 using FindObjectCallback = void*(*)(std::string_view);
 using DispatchCallback = void(*)(void*, void*, void*);
+using ReadMemoryCallback = bool(*)(std::uintptr_t, void*, std::size_t);
+using AcquireLifetimeCallback = bool(*)();
+using ReleaseLifetimeCallback = void(*)();
+struct ObjectHandle {
+    std::uintptr_t Address=0, Class=0, Outer=0, VTable=0;
+    FName Name{};
+    std::int32_t Index=-1, Serial=0;
+    std::uint64_t Epoch=0;
+};
 void Initialize(std::uintptr_t moduleBase=0, std::int32_t processEventIndex=-1);
 void SetCallbacks(FindObjectCallback findObject, DispatchCallback dispatch);
+void SetMemoryReader(ReadMemoryCallback reader);
+void SetLifetimeGuard(AcquireLifetimeCallback acquire, ReleaseLifetimeCallback release);
+ObjectHandle MakeObjectHandle(const void* object);
+ObjectHandle FindObjectHandle(std::string_view path);
+void* ResolveObjectHandle(const ObjectHandle& handle);
 void RefreshObjectCache();
 void* FindObject(std::string_view path);
 void* GetDefaultObject(std::string_view classPath);
 std::string ObjectName(const void* object);
 std::string ObjectPath(const void* object);
 void Invoke(void* object, std::string_view functionPath, void* parameters);
+void Invoke(const ObjectHandle& object, std::string_view functionPath, void* parameters);
 void DispatchEvent(void* object, void* function, void* parameters);
 }
 }
@@ -122,17 +138,26 @@ class Generator:
                 target = d.get("target") or f.get("target")
                 if target and f["type"] in {"EnumProperty", "ByteProperty"}: usage[target][f["element_size"]] += 1
         used: set[str] = {'FName','FString','FUtf8String','FScriptDelegate','TArray','TMap','TSet','TOptional','TUnresolved','Runtime'}
+        reserved=set(used)
         def actor_type(o):
             seen=set()
             while o and o["path"] not in seen:
                 if o["path"]=="/Script/Engine.Actor": return True
                 seen.add(o["path"]); o=self.by_path.get(o.get("super"))
             return False
+        bases={}
         for o in owners:
             prefix = {"class": "A" if actor_type(o) else "U", "struct": "F", "enum": "E", "function": "Params_"}[o["kind"]]
             raw = identifier(o["name"])
             name = raw if o["kind"]=="enum" and raw.startswith("E") else prefix+raw
-            if name in used: name += "_"+hashlib.sha1(o["path"].encode()).hexdigest()[:8]
+            bases[o['path']]=name
+        counts=Counter(bases.values())
+        core={'/Script/CoreUObject.Object':'UObject','/Script/CoreUObject.Class':'UClass','/Script/CoreUObject.Function':'UFunction'}
+        for o in sorted(owners,key=lambda row:row['path']):
+            name=bases[o['path']]
+            if o['path'] in core:name=core[o['path']]
+            elif o['kind']=='function' or counts[name]>1 or name in reserved or name in core.values():
+                name += "_"+hashlib.sha256(o["path"].encode()).hexdigest()[:12]
             self.names[o["path"]] = _unique(name, used)
             if o["kind"]=="enum":
                 values=[v["value"] for v in o["enum_values"]] or [0]
@@ -219,17 +244,17 @@ class Generator:
     def layout(self, o: dict, fields: list[dict], methods: list[str], parameters=False) -> str:
         symbol=self.names[o['path']];size=o.get('parameter_size') if parameters else o['size']
         if size is None: raise CodegenError(f"{o['path']}: no verified size")
-        alignment_known=not parameters and bool(o.get('alignment'))
-        alignment=o.get('alignment') or 1
-        if not isinstance(alignment,int) or alignment not in (1,2,4,8,16,32,64):alignment=1
-        if parameters: alignment=1  # Invoke uses an aligned local instance of this exact parameter byte layout.
-        if size and size%alignment:alignment=1;self.issue(o['path'],"", "alignment did not divide size")
+        # These are packed reflected storage views. Even an alignas on a
+        # contained script struct can raise the alignment of a Blueprint view
+        # in MSVC and round its unaligned field span. MinAlignment is audited
+        # separately until a complete native allocation ABI can be represented.
+        alignment=1
         base=self.by_path.get(o.get('super')) if not parameters else None
         if base and base['kind'] not in {'class','struct'}:base=None
         cursor=(base['size'] or 0) if base else 0
         if cursor>size:raise CodegenError(f"{o['path']}: superclass exceeds derived size")
         base_decl=f" : public {self.names[base['path']]}" if base and cursor else ""
-        alignment_decl=f" alignas({alignment})" if alignment_known else ''
+        alignment_decl=''
         lines=[f"// {o['path']} | size 0x{size:X}",f"struct{alignment_decl} {symbol}{base_decl} {{"]
         assertions=[];groups=defaultdict(list)
         for f in fields:groups[f['offset']].append(f)
@@ -280,7 +305,7 @@ class Generator:
         lines.extend(methods);lines.append("};")
         if size:
             lines.append(f"static_assert(sizeof({symbol}) == 0x{size:X});")
-            if alignment_known:lines.append(f"static_assert(alignof({symbol}) == {alignment});")
+            lines.append(f"static_assert(alignof({symbol}) == {alignment}); // reflected storage view")
             for name,offset in assertions:lines.append(f"static_assert(offsetof({symbol}, {name}) == 0x{offset:X});")
         return '\n'.join(lines)+'\n'
 
@@ -366,14 +391,37 @@ class Generator:
                'CompileCheck.cpp':'#include "SDK.hpp"\nint main() { return 0; }\n',
                'CMakeLists.txt':'cmake_minimum_required(VERSION 3.20)\nproject(EbonSDK LANGUAGES CXX)\nadd_library(EbonSDK STATIC Runtime.cpp)\ntarget_include_directories(EbonSDK PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})\ntarget_compile_features(EbonSDK PUBLIC cxx_std_17)\nif(MSVC)\n target_compile_options(EbonSDK PUBLIC /bigobj /utf-8)\nendif()\nadd_executable(EbonSDKCompileCheck CompileCheck.cpp)\ntarget_link_libraries(EbonSDKCompileCheck PRIVATE EbonSDK)\n'}
         for package,rows in package_entries.items():files[f'Packages/{package}.hpp']='#pragma once\n#include "../SDK.hpp"\nnamespace SDK::Packages::'+package+' {\n'+'\n'.join(rows)+'\n}\n'
+        aliases=[]
+        canonical=set(self.names.values())
+        legacy=Counter(identifier(o['name']) for o in self.owners if o['kind']=='function')
+        for o in self.owners:
+            if o['kind']=='function' and legacy[identifier(o['name'])]==1:
+                alias='Params_'+identifier(o['name'])
+                if alias not in canonical:aliases.append(f"using {alias} = {self.names[o['path']]};")
+        files['Parameters.hpp']+='\nnamespace SDK {\n'+'\n'.join(aliases)+'\n}\n'
         return files
 
 
-def generate_cpp_sdk(dump_dir, output_dir, runtime_profile=None, network_capture=None):
+def generate_cpp_sdk(dump_dir, output_dir, runtime_profile=None, network_capture=None, extra_network_captures=None, symbol_baseline=None):
     source=Path(dump_dir).resolve();output=Path(output_dir).resolve()
     if output==source or output in source.parents or source in output.parents:raise CodegenError('SDK output must be separate from source dump')
     if output.exists() and (not output.is_dir() or any(output.iterdir())):raise CodegenError('SDK output must be new or empty')
     state,owners,objects=_validate_dump(source)
+    alignment_evidence=replay_alignments(source,state,owners)
+    target_evidence=replay_property_targets(source,state,owners)
+    if state.get('merged_captures'):
+        from .sdk_merge import layout_signature
+        by_path={o['path']:o for o in owners}
+        for entry in state['merged_captures']:
+            original=Path(entry['capture'])
+            original_state,original_owners,original_objects=_validate_dump(original);del original_objects
+            if (original_state.get('build') or {}).get('sha256')!=(state.get('build') or {}).get('sha256'):
+                raise CodegenError('Merged alignment evidence SHA-256 mismatch')
+            checked=replay_alignments(original,original_state,original_owners)
+            for row in original_owners:
+                target=by_path.get(row['path'])
+                if target and row['path'] in checked and layout_signature(row)==layout_signature(target) and target.get('alignment')==row['alignment']:
+                    alignment_evidence[row['path']]=checked[row['path']]
     profile_path=Path(runtime_profile) if runtime_profile else Path(__file__).resolve().parents[2]/'profiles'/'nte-sdk-runtime.json'
     if profile_path.is_file():
         profile=json.loads(profile_path.read_text(encoding='utf-8'))
@@ -384,6 +432,11 @@ def generate_cpp_sdk(dump_dir, output_dir, runtime_profile=None, network_capture
                     raise CodegenError('Captured ProcessEvent slot does not match the runtime profile')
             state['process_event_vtable_index']=int(profile['process_event_vtable_index'])
             state['process_event_rva']=profile['process_event_rva']
+            verified=profile.get('runtime_layout',{})
+            existing=state.get('runtime_layout',{})
+            if any(key in existing and existing[key]!=value for key,value in verified.items()):
+                raise CodegenError('Runtime lifecycle layout differs from the version-bound profile')
+            state['runtime_layout']={**existing,**verified}
         elif runtime_profile:raise CodegenError('Runtime profile does not match the captured module SHA-256')
     generator=Generator(state,owners);files=generator.generate()
     files.update(runtime_files(state))
@@ -395,16 +448,20 @@ def generate_cpp_sdk(dump_dir, output_dir, runtime_profile=None, network_capture
         if (network_state.get('build') or {}).get('sha256')!=(state.get('build') or {}).get('sha256'):
             raise CodegenError('Network snapshot module SHA-256 does not match the SDK source')
         network_owners=_jsonl(network_source/'types.jsonl')
-    network_files,network_summary=generate_network_files(network_source,network_owners,verified_owners=owners if network_capture else None)
+    network_files,network_summary=generate_network_files(network_source,network_owners,verified_owners=owners if network_capture else None,
+                                                        extra_captures=extra_network_captures)
     files.update(network_files)
     files['SDK.hpp']+='#include "Network.hpp"\n'
     manifest={'format':2,'generator':'EbonCore-Dumper C++ SDK','source_build':state.get('build'),
               'source_objects':len(objects),'source_types':len(owners),'generated_layouts':sum(o['kind'] in {'class','struct'} for o in owners),
+              'sdk_validated_subset':bool(state.get('sdk_validated_subset')),'excluded_types':state.get('excluded_types',[]),
               'generated_parameter_structs':sum(o['kind']=='function' for o in owners),'generated_function_wrappers':generator.wrapper_count,
               'generated_enums':sum(o['kind']=='enum' for o in owners),
               'unresolved_fields':sum(i['reason']!='superclass tail padding exposed through an offset accessor' for i in generator.issues),
               'offset_accessors':sum(i['reason']=='superclass tail padding exposed through an offset accessor' for i in generator.issues),
               'alignment_unknown_layouts':sum(o['kind'] in {'class','struct'} and not o.get('alignment') for o in owners),
+              'alignment_byte_verified_layouts':len(alignment_evidence),
+              'alignment_abi_verified_layouts':0,
               'process_event_vtable_index':state.get('process_event_vtable_index'),
               'network':network_summary,
               'network_source':{'capture':str(network_source),'reflection_capture_success':bool(network_state.get('success')),
@@ -413,7 +470,28 @@ def generate_cpp_sdk(dump_dir, output_dir, runtime_profile=None, network_capture
                              'Live calls require an initialized dispatcher and the game thread; compilation and mock dispatch do not prove live-call compatibility.']}
     files['sdk_manifest.json']=json.dumps(manifest,ensure_ascii=False,indent=2)+'\n'
     files['unresolved.json']=json.dumps(generator.issues,ensure_ascii=False,indent=2)+'\n'
+    files['semantic_recovery.json']=json.dumps(target_evidence,ensure_ascii=False,indent=2)+'\n'
     files['type_map.json']=json.dumps(generator.names,ensure_ascii=False,indent=2)+'\n'
+    migration=[];aliases=[];canonical=set(generator.names.values())
+    if symbol_baseline:
+        previous=json.loads(Path(symbol_baseline).read_text(encoding='utf-8'))
+        if not isinstance(previous,dict):raise CodegenError('Symbol baseline must be a type_map.json object')
+        used=set(canonical)
+        for path,old in sorted(previous.items()):
+            new=generator.names.get(path)
+            if new and old!=new:
+                available=isinstance(old,str) and identifier(old)==old and old not in used
+                if available:aliases.append(f"using {old} = {new};");used.add(old)
+                migration.append({'path':path,'old':old,'new':new,'compatibility_alias':available})
+        # Existing unique short aliases are already in Parameters.hpp.
+        unique_aliases=set(re.findall(r'using (Params_\w+) = ',files['Parameters.hpp']))
+        aliases=[a for a in aliases if a.split()[1] not in unique_aliases]
+    files['SymbolAliases.hpp']='#pragma once\n#include "Parameters.hpp"\nnamespace SDK {\n'+'\n'.join(aliases)+'\n}\n'
+    files['SDK.hpp']+='#include "SymbolAliases.hpp"\n'
+    files['symbol_migration.json']=json.dumps(migration,ensure_ascii=False,indent=2)+'\n'
+    files['layout_audit.json']=json.dumps({'format':'EbonLayoutAudit-v1','alignments':alignment_evidence,
+        'alignment_unknown':[o['path'] for o in owners if o['kind'] in {'class','struct'} and not o.get('alignment')],
+        'abi_comparison_verified':False},ensure_ascii=False,indent=2)+'\n'
     output.mkdir(parents=True)
     try:
         for relative,text in files.items():
@@ -424,120 +502,36 @@ def generate_cpp_sdk(dump_dir, output_dir, runtime_profile=None, network_capture
 
 
 def runtime_files(state):
-    return {'Runtime.cpp':RUNTIME.replace('@NAME_POOL@',str(int(state.get('name_pool_rva') or '0',0)))
-             .replace('@OBJECT_ARRAY@',str(int(state.get('object_array_rva') or '0',0)))
-             .replace('@PROCESS_EVENT@',str(state.get('process_event_vtable_index',-1))),
+    layout={'ARRAY_COUNT':36,'ARRAY_CHUNKS':16,'ARRAY_NUM_CHUNKS':44,'ELEMENTS_PER_CHUNK':65536,
+            'ITEM_STRIDE':24,'ITEM_OBJECT':0,'ITEM_SERIAL':16,'ITEM_FLAGS':8,'INVALID_INTERNAL_FLAGS':0x10200000,
+            'OBJECT_INDEX':12,'OBJECT_FLAGS':8,'OBJECT_CLASS':16,'OBJECT_NAME':24,'OBJECT_OUTER':32,
+            'NAME_BITS':16,'NAME_STRIDE':2,'NAME_SHIFT':6,'NAME_WIDE':1,'NAME_HEADER':2,
+            'POOL_BLOCK':8,'POOL_CURSOR':12,'POOL_BLOCKS':16}
+    layout.update(state.get('runtime_layout',{}))
+    if layout['ELEMENTS_PER_CHUNK']<256 or layout['ELEMENTS_PER_CHUNK']>1048576 or not 8<=layout['ITEM_STRIDE']<=128:
+        raise CodegenError('Invalid runtime object array stride/chunk size')
+    if any(layout[k]+size>layout['ITEM_STRIDE'] for k,size in [('ITEM_OBJECT',8),('ITEM_SERIAL',4),('ITEM_FLAGS',4)]):
+        raise CodegenError('Runtime object item field exceeds stride')
+    if not 12<=layout['NAME_BITS']<=20 or not 1<=layout['NAME_STRIDE']<=8 or not 0<=layout['NAME_SHIFT']<=15:
+        raise CodegenError('Invalid runtime FName layout')
+    text=Path(__file__).with_name('runtime_template.cpp').read_text(encoding='utf-8')
+    layout.update(NAME_POOL=int(state.get('name_pool_rva') or '0',0),
+                  OBJECT_ARRAY=int(state.get('object_array_rva') or '0',0),
+                  PROCESS_EVENT=state.get('process_event_vtable_index',-1))
+    for key,value in layout.items():
+        if isinstance(value,bool) or not isinstance(value,int) or value<(-1 if key=='PROCESS_EVENT' else 0):
+            raise CodegenError('Invalid runtime layout constant: '+key)
+        text=text.replace('@'+key+'@',str(value))
+    return {'Runtime.cpp':text,
             'README.md':'''# Ebon C++ SDK
 
-Include SDK.hpp and link Runtime.cpp (or the generated CMake library). Types.hpp contains real members, inheritance, padding, bitfields and static layout assertions. Parameters.hpp contains exact ProcessEvent parameter buffers; Functions.hpp supplies typed method wrappers with input/output marshalling. Packages/ headers provide package namespaces; type_map.json maps original reflection paths to C++ symbols.
+Include SDK.hpp and link Runtime.cpp (or the generated CMake library). Types.hpp contains packed reflected storage views with members, inheritance, padding, bitfields and sizeof/offsetof/alignof assertions. Engine MinAlignment is recorded separately in layout_audit.json: these declarations preserve field spans and do not establish a native allocation ABI. Parameters.hpp contains ProcessEvent parameter buffers; Functions.hpp supplies typed method wrappers with input/output marshalling. Packages/ headers provide package namespaces; type_map.json maps original reflection paths to C++ symbols.
 
 Call SDK::Runtime::Initialize() inside the matching game process. If no ProcessEvent slot was verified, supply a verified slot or install dispatcher callbacks with SetCallbacks; unknown slots are never guessed. Call wrappers on the game thread. Static methods resolve the class default object. Native function addresses are not directly invoked with a guessed ABI.
 
+Lookup pointers are borrowed. Store ObjectHandle values from MakeObjectHandle/FindObjectHandle and resolve them again before use. Index, serial, object header and runtime epoch are checked on every resolution; zero/unassigned serials cannot produce durable handles. Cache misses and expired entries trigger a fresh inventory. All memory copies use a checked reader. Native dispatch requires SetLifetimeGuard with the host's real engine GC exclusion/pinning acquire/release functions; a mutex or readable page alone does not pin a UObject. Initialize must run on the game thread. Callback hosts own their dispatcher and object lifetime contract.
+
+Function parameter names include a hash of the full reflection path. Unique old short parameter names have compatibility aliases; use type_map.json for qualified symbols.
+
 TArray/FString and other engine containers are non-owning views. TMap/TSet preserve typed keys/elements and observed storage sizes; allocator internals, container mutation and ownership operations are not synthesized. Fields whose semantic type is still unknown use TUnresolved<N> and are listed in unresolved.json. Do not treat these as fully reconstructed types.
 '''}
-
-
-RUNTIME=r'''#include "Basic.hpp"
-#include <unordered_map>
-#include <mutex>
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
-#endif
-namespace SDK::Runtime {
-namespace {
-std::uintptr_t Base=0;
-std::int32_t EventIndex=@PROCESS_EVENT@;
-FindObjectCallback FindCallback=nullptr;
-DispatchCallback Dispatch=nullptr;
-std::unordered_map<std::string,void*> Cache;
-std::recursive_mutex Lock;
-template<typename T> T Read(std::uintptr_t address) { T v{}; std::memcpy(&v,reinterpret_cast<const void*>(address),sizeof(v)); return v; }
-std::string Name(FName value) {
-    const auto pool=Base+@NAME_POOL@;
-    const auto block=Read<std::uintptr_t>(pool+16+(value.ComparisonIndex>>16)*8);
-    const auto address=block+(value.ComparisonIndex&65535)*2;
-    const auto header=Read<std::uint16_t>(address);
-    const auto length=header>>6;
-    if(!length || length>1023) return {};
-    std::string result;
-    if(!(header&1)) result.assign(reinterpret_cast<const char*>(address+2),length);
-    else {
-#ifdef _WIN32
-        const auto* text=reinterpret_cast<const wchar_t*>(address+2);
-        const int count=WideCharToMultiByte(CP_UTF8,0,text,length,nullptr,0,nullptr,nullptr);
-        result.resize(count); WideCharToMultiByte(CP_UTF8,0,text,length,result.data(),count,nullptr,nullptr);
-#else
-        throw std::runtime_error("Wide FName decoding requires Windows");
-#endif
-    }
-    if(value.Number)result+="_"+std::to_string(value.Number-1);
-    return result;
-}
-void* At(std::int32_t index) {
-    const auto array=Base+@OBJECT_ARRAY@;
-    const auto table=Read<std::uintptr_t>(array+16);
-    const auto chunk=Read<std::uintptr_t>(table+(index/65536)*8);
-    return Read<void*>(chunk+(index%65536)*24);
-}
-}
-void SetCallbacks(FindObjectCallback findObject, DispatchCallback dispatch) {
-    std::lock_guard<std::recursive_mutex> guard(Lock);FindCallback=findObject;Dispatch=dispatch;Cache.clear();
-}
-void Initialize(std::uintptr_t moduleBase,std::int32_t processEventIndex) {
-    std::lock_guard<std::recursive_mutex> guard(Lock);
-#ifdef _WIN32
-    Base=moduleBase?moduleBase:reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
-#else
-    Base=moduleBase;
-#endif
-    if(!Base)throw std::runtime_error("SDK module base is not initialized");
-    if(processEventIndex>=0)EventIndex=processEventIndex;
-    Cache.clear();
-}
-std::string ObjectName(const void* object) {
-    if(!Base||!object)throw std::runtime_error("SDK object/module is not initialized");
-    return Name(Read<FName>(reinterpret_cast<std::uintptr_t>(object)+24));
-}
-std::string ObjectPath(const void* object) {
-    if(!Base||!object)return {};
-    std::string path;
-    for(unsigned n=0;object&&n<64;++n){
-        const auto name=ObjectName(object);if(name.empty())return {};
-        path=path.empty()?name:name+"."+path;
-        object=Read<void*>(reinterpret_cast<std::uintptr_t>(object)+32);
-    }
-    return object?std::string():path;
-}
-void RefreshObjectCache() {
-    std::lock_guard<std::recursive_mutex> guard(Lock);
-    if(!Base)throw std::runtime_error("Call SDK::Runtime::Initialize first");
-    Cache.clear();const auto count=Read<std::int32_t>(Base+@OBJECT_ARRAY@+36);
-    if(count<0||count>10000000)throw std::runtime_error("Object array header failed validation");
-    for(std::int32_t i=0;i<count;++i){void* object=At(i);if(!object)continue;auto path=ObjectPath(object);if(!path.empty())Cache.emplace(std::move(path),object);}
-}
-void* FindObject(std::string_view path) {
-    std::lock_guard<std::recursive_mutex> guard(Lock);
-    if(FindCallback)return FindCallback(path);
-    if(Cache.empty())RefreshObjectCache();
-    auto it=Cache.find(std::string(path));if(it==Cache.end())throw std::runtime_error("Reflected object was not found: "+std::string(path));
-    return it->second;
-}
-void* GetDefaultObject(std::string_view classPath) {
-    auto path=std::string(classPath);const auto dot=path.rfind('.');
-    if(dot==path.npos)throw std::runtime_error("Invalid reflected class path");
-    path.insert(dot+1,"Default__");return FindObject(path);
-}
-void DispatchEvent(void* object,void* function,void* parameters) {
-    if(!object)throw std::runtime_error("Cannot call a function on a null object");
-    if(!function)throw std::runtime_error("Cannot call a null reflected function");
-    if(Dispatch){Dispatch(object,function,parameters);return;}
-    if(EventIndex<0)throw std::runtime_error("A verified ProcessEvent vtable index or dispatcher callback is required");
-    auto vtable=*reinterpret_cast<std::uintptr_t**>(object);
-    auto event=reinterpret_cast<DispatchCallback>(vtable[EventIndex]);
-    event(object,function,parameters);
-}
-void Invoke(void* object,std::string_view path,void* parameters) { DispatchEvent(object,FindObject(path),parameters); }
-}
-'''

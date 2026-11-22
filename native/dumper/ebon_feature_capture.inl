@@ -53,11 +53,21 @@ bool battleResource(const Object& object,const Type& type)const{
             isA(&type,"/Script/GameplayAbilities.AbilitySystemComponent"))&&
            battleIdentity(object.path+" "+type.path+" "+type.super);
 }
+bool characterResource(const Object& object,const Type& type)const{
+    return !types_.count(object.address)&&
+        (isA(&type,"/Script/HTGame.HTPlayerCharacter")||
+         type.path.rfind("/Game/Blueprints/Character/Player/",0)==0||
+         (instance(object)&&object.name=="DT_Character"&&isA(&type,"/Script/Engine.DataTable")));
+}
 bool miniMapDataAsset(const Object& object,const Type& type)const{
     if(types_.count(object.address)||!isA(&type,"/Script/HTGame.MiniMapDataAsset"))return false;
     // The CDO holds the hard DataTable references even when no live map screen
     // has instantiated the asset. Include it alongside loaded runtime copies.
     return instance(object)||object.name.rfind("Default__",0)==0;
+}
+bool miniMapDataTable(const Object& object,const Type& type)const{
+    return instance(object)&&isA(&type,"/Script/Engine.DataTable")&&
+           lower(object.path).rfind("/game/datatable/minimap/",0)==0;
 }
 const Object* playerOwner(const Object& object)const{
     std::set<std::uint64_t> seen;const Object* cursor=&object;
@@ -142,21 +152,26 @@ void capturePriorities(){
     if(!config_.number("resource_feature_exports",1))return;
     const auto menuMax=(std::size_t)option("resource_feature_max_objects",4096,1,65536);
     const auto battleMax=(std::size_t)option("resource_battle_max_objects",4096,1,65536);
+    const auto characterMax=(std::size_t)option("resource_character_max_objects",1024,1,65536);
     const auto maxDepth=(unsigned)option("resource_dependency_depth",8,1,64);
+    const auto focus=config_.text("resource_character_focus");
     std::map<std::string,const Object*> byPath;
     std::map<std::uint64_t,const Object*> defaults;
     std::vector<const Object*> menu;
     std::vector<const Object*> maps;
+    std::vector<const Object*> characters;
     std::array<std::vector<const Object*>,3> battle;
     for(const auto& object:reflection_.objects){
         checkpoint();
         byPath[object.path]=&object;
         if(object.name.rfind("Default__",0)==0)defaults[object.klass]=&object;
         auto type=types_.find(object.klass);if(type==types_.end()||types_.count(object.address))continue;
+        if(characterResource(object,*type->second)&&(focus.empty()||type->second->path==focus||object.name=="DT_Character"))characters.push_back(&object);
+        if(!focus.empty())continue;
         if(featureAsset(object,*type->second)||featureTable(object,*type->second)||featureComponent(object,*type->second)||
            menuBinding(object,*type->second)||containsField(type->second,{"functionunlockdatatable","mainformvisibilityconfigdatatable"}))
             menu.push_back(&object);
-        if(miniMapDataAsset(object,*type->second))maps.push_back(&object);
+        if(miniMapDataAsset(object,*type->second)||miniMapDataTable(object,*type->second))maps.push_back(&object);
         if(battleResource(object,*type->second)){
             const auto rank=instance(object)&&(isA(type->second,"/Script/Engine.DataTable")||
                 isA(type->second,"/Script/Engine.DataAsset"))?0:templateObject(object)?1:2;
@@ -166,7 +181,7 @@ void capturePriorities(){
     captureReferences_=true;
     std::map<std::string,std::vector<std::size_t>> referenceIndices;
     struct Stage {std::size_t visited=0,depthLimited=0;bool limited=false;};
-    const auto runStage=[&](const std::vector<const Object*>& seeds,std::size_t limit,bool battleStage){
+    const auto runStage=[&](const std::vector<const Object*>& seeds,std::size_t limit,bool battleStage,bool reserveRoots=false){
         Stage stage;
         std::vector<std::pair<const Object*,unsigned>> queue;std::set<std::string> queued;
         const auto enqueue=[&](const Object& object,unsigned depth){
@@ -174,6 +189,9 @@ void capturePriorities(){
             if(queue.size()>=limit){stage.limited=true;return;}
             queued.insert(object.path);queue.push_back({&object,depth});
         };
+        // Reserve every player root before its mesh/animation closure can use
+        // the remaining slots. General stages retain dependency-first order.
+        if(reserveRoots)for(const auto seed:seeds)enqueue(*seed,0);
         std::size_t next=0;
         for(const auto seed:seeds){
             // Drain dependencies before the next broad seed can take their slots.
@@ -184,6 +202,9 @@ void capturePriorities(){
                 const auto before=assetReferences_.size();exportObject(*object);
                 const auto end=assetReferences_.size();
                 for(auto i=before;i<end;++i)referenceIndices[assetReferences_[i].root].push_back(i);
+                // Keep the table as identity evidence for this request, but
+                // do not spend the focused budget on every other roster row.
+                if(!focus.empty()&&object->name=="DT_Character")continue;
                 for(const auto i:referenceIndices[object->path]){
                     auto found=byPath.find(assetReferences_[i].target);if(found==byPath.end())continue;
                     auto target=found->second;
@@ -200,9 +221,13 @@ void capturePriorities(){
         }
         stage.visited=queue.size();return stage;
     };
-    const auto menuStage=runStage(menu,menuMax,false);
+    const auto characterStage=runStage(characters,characterMax,true,true);
     const auto mapMax=(std::size_t)option("resource_map_max_objects",4096,1,65536);
+    // Map tables are direct roots as well as MiniMapDataAsset dependencies.
+    // Run them before broader menu closure so a later byte-budget failure
+    // cannot leave loaded map data unexported.
     const auto mapStage=runStage(maps,mapMax,false);
+    const auto menuStage=runStage(menu,menuMax,false);
     writeFeatureReports(menuStage.limited||mapStage.limited);
     std::vector<const Object*> battleSeeds;
     for(const auto& tier:battle)battleSeeds.insert(battleSeeds.end(),tier.begin(),tier.end());
@@ -217,6 +242,7 @@ void capturePriorities(){
             ",\"depth_limited_references\":"+std::to_string(stage.depthLimited)+"}";
     };
     line(plan,"{\"format\":\"EbonPriorityCapture-v1\",\"dependency_depth\":"+std::to_string(maxDepth)+
+        ",\"characters\":"+stageJson(characterStage,characters.size(),characterMax)+
         ",\"menu\":"+stageJson(menuStage,menu.size(),menuMax)+",\"maps\":"+stageJson(mapStage,maps.size(),mapMax)+
         ",\"battle\":"+stageJson(battleStage,battleSeeds.size(),battleMax)+
         ",\"battle_config_candidates\":"+std::to_string(battle[0].size())+"}");
@@ -237,6 +263,7 @@ void writeFeatureReports(bool limited){
         auto type=types_.find(object.klass);if(type==types_.end()||types_.count(object.address))continue;
         if(featureAsset(object,*type->second))roots.push_back(&object);
         if(featureTable(object,*type->second))tablePaths.insert(object.path);
+        if(miniMapDataTable(object,*type->second))tablePaths.insert(object.path);
         if(featureComponent(object,*type->second))components.push_back(&object);
         if(menuBinding(object,*type->second))buttons.push_back(&object);
     }
@@ -300,7 +327,7 @@ void writeBattleReport(){
     // class paths are load targets; their metadata is in reflection/types.jsonl.
     for(const auto& object:reflection_.objects){
         auto type=types_.find(object.klass);if(type==types_.end()||
-            (!battleObjects_.count(object.path)&&!battleResource(object,*type->second)))continue;
+            (!battleObjects_.count(object.path)&&(!config_.text("resource_character_focus").empty()||!battleResource(object,*type->second))))continue;
         line(battle,objectMeta(object,*type->second));
     }
     for(const auto& ref:assetReferences_)

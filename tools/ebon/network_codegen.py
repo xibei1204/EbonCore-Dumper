@@ -19,7 +19,9 @@ def _optional(value, label, maximum=65535):
     return value
 
 
-def generate_network_files(source: Path, owners: list[dict], verified_owners=None) -> tuple[dict, dict]:
+def generate_network_files(source: Path, owners: list[dict], verified_owners=None, extra_captures=None) -> tuple[dict, dict]:
+    source_state=json.loads((source/'dump_state.json').read_text(encoding='utf-8'))
+    rejected_tables=[]
     rpcs=[];properties=[]
     for owner in owners:
         flags=_number(owner.get('flags'))
@@ -63,17 +65,25 @@ def generate_network_files(source: Path, owners: list[dict], verified_owners=Non
                 raise CodegenError('An observed FRepLayout decoder is required for replication handles')
         tables=raw.get('class_tables',[]);active=raw.get('active_network_objects',[]);layout_offsets=raw.get('layout_offsets',{})
         candidates=raw.get('runtime_cache_candidates',[])
+        valid_tables=[]
         for table in tables:
+            invalid=None
             if table['kind']=='class_net_fields':
                 for position,row in enumerate(table['entries']):
                     if row.get('position')!=position or row.get('path') not in expected_rpcs:
-                        raise CodegenError('Invalid class NetFields table')
+                        invalid='Invalid class NetFields table';break
             elif table['kind']=='class_reps':
                 for position,row in enumerate(table['entries']):
                     p=expected_props.get((row['owner'],row['property']))
                     if p is None or p['rep_index'] is None or p['rep_index']+row.get('array_index',-1)!=position or row['rep_index']!=position:
-                        raise CodegenError('Invalid class replication record')
+                        invalid='Invalid class replication record';break
             else:raise CodegenError('Unknown class network table kind')
+            if invalid:
+                if source_state.get('success') is False and verified_owners is not None:
+                    rejected_tables.append(dict(class_=table.get('class'),kind=table['kind'],reason=invalid))
+                else:raise CodegenError(invalid)
+            else:valid_tables.append(table)
+        tables=valid_tables
     # A scene snapshot can contain unloading Blueprint metadata. Do not let
     # corrupt flags produce invented RPC IDs merely because FUNC_Net is set.
     by_path={o['path']:o for o in owners}
@@ -125,6 +135,38 @@ def generate_network_files(source: Path, owners: list[dict], verified_owners=Non
     except ValueError as error:raise CodegenError('Invalid NetworkVersion evidence: '+str(error)) from error
     try:runtime=checked_runtime_mapping(source,owners,(state.get('build') or {}).get('sha256'),active)
     except (KeyError,TypeError,ValueError) as error:raise CodegenError('Invalid runtime mapping evidence: '+str(error)) from error
+    additional=[];field_conflicts=[]
+    for capture in extra_captures or []:
+        capture=Path(capture).resolve()
+        if capture==source.resolve():continue
+        other_state=json.loads((capture/'dump_state.json').read_text(encoding='utf-8'))
+        if (other_state.get('build') or {}).get('sha256')!=(state.get('build') or {}).get('sha256'):
+            raise CodegenError('Additional network snapshot SHA-256 mismatch')
+        from .sdk_codegen import _jsonl
+        from .sdk_merge import layout_signature
+        other_owners=_jsonl(capture/'types.jsonl')
+        other_files,_=generate_network_files(capture,other_owners,verified_owners=verified_owners or owners)
+        other=json.loads(other_files['network_metadata.json'])
+        reference={o['path']:o for o in (verified_owners or owners)}
+        observed_owners={o['path']:o for o in other_owners}
+        accepted_paths={p for p,o in observed_owners.items() if o.get('complete') is not False and p in reference and layout_signature(o)==layout_signature(reference[p])}
+        def accepted_field(field):
+            path=field['path']
+            if field['rpc']:return path in accepted_paths
+            while '.' in path:
+                path=path.rsplit('.',1)[0]
+                if path in accepted_paths:return True
+            return False
+        fields=[f for f in other['runtime_mappings']['field_indices'] if accepted_field(f)]
+        additional.append({'capture':str(capture),'summary':other['summary'],'field_indices':fields})
+        existing={(f['class'],f['path'],f['field_net_index'],f['checksum']) for f in runtime['field_indices']}
+        for field in fields:
+            key=(field['class'],field['path'],field['field_net_index'],field['checksum'])
+            if key not in existing:runtime['field_indices'].append(dict(field,capture=str(capture)));existing.add(key)
+    contexts={}
+    for field in runtime['field_indices']:
+        contexts.setdefault((field['class'],field['path']),set()).add(field['field_net_index'])
+    field_conflicts=[dict(owner=c,path=p,indices=sorted(values)) for (c,p),values in contexts.items() if len(values)>1]
     rpc_index_map={}
     for row in runtime['field_indices']:
         if row['rpc'] and not row.get('incompatible'):rpc_index_map.setdefault(row['path'],set()).add(row['field_net_index'])
@@ -152,6 +194,9 @@ def generate_network_files(source: Path, owners: list[dict], verified_owners=Non
                  class_replication_tables=sum(t['kind']=='class_reps' for t in tables),
                  active_network_objects=len(active),field_net_indices_observed=observed_indices,rep_layout_handles_observed=observed_handles,
                  rpc_field_net_indices_observed=sum(r['field_net_index'] is not None for r in rpcs),
+                 rpc_field_net_indices_missing=sum(r['field_net_index'] is None for r in rpcs),
+                 additional_network_captures=len(additional),field_index_conflicts=len(field_conflicts),
+                 rejected_class_tables=len(rejected_tables),
                  class_net_caches_observed=len(runtime['caches']),rep_layouts_observed=len(runtime['layouts']),
                  partial_rep_layouts=sum(bool(l.get('partial')) for l in runtime['layouts']),
                  rep_layout_parent_records_observed=sum(len(l['parents']) for l in runtime['layouts']),
@@ -165,6 +210,8 @@ def generate_network_files(source: Path, owners: list[dict], verified_owners=Non
                   local_network_version=version['value'],network_version_verified=version['verified'],
                   network_version_status=version['status'])
     normalized=dict(format='EbonNetwork-v1',summary=summary,rpcs=rpcs,properties=properties,
+                    additional_captures=additional,field_index_conflicts=field_conflicts,
+                    rejected_class_tables=rejected_tables,
                     runtime_mapping_status=coverage,
                     class_tables=tables,active_network_objects=active,layout_offsets=layout_offsets,rejected_rep_notify=rejected_notify,runtime_cache_candidates=candidates,excluded_unstable_records=excluded,
                     runtime_mappings=runtime,network_version=version,
@@ -214,7 +261,7 @@ def generate_network_files(source: Path, owners: list[dict], verified_owners=Non
     lines+=['}};',
             'inline constexpr const FRpcInfo* FindRpc(std::string_view path) { for(const auto& rpc:Rpcs) if(rpc.Path==path) return &rpc; return nullptr; }',
             'inline constexpr const FReplicatedPropertyInfo* FindProperty(std::string_view owner, std::string_view name) { for(const auto& field:ReplicatedProperties) if(field.Owner==owner && field.Name==name) return &field; return nullptr; }',
-            'inline constexpr const FRuntimeFieldIndex* FindFieldIndex(std::string_view owner, std::string_view path) { for(const auto& field:RuntimeFieldIndices) if(field.Class==owner && field.Path==path) return &field; return nullptr; }',
+            'inline constexpr const FRuntimeFieldIndex* FindFieldIndex(std::string_view owner, std::string_view path) { const FRuntimeFieldIndex* result=nullptr; for(const auto& field:RuntimeFieldIndices) if(field.Class==owner && field.Path==path) { if(result && result->FieldNetIndex!=field.FieldNetIndex) return nullptr; result=&field; } return result; }',
             'inline constexpr const FRuntimeRepHandle* FindRepHandle(std::string_view owner, std::uint32_t handle, std::int32_t scope=-1) { for(const auto& field:RuntimeRepHandles) if(field.Class==owner && field.RelativeHandle==handle && field.ScopeCmdIndex==scope) return &field; return nullptr; }',
             'inline constexpr bool HasObservedWireMapping = '+str(bool(observed_indices and observed_handles)).lower()+';',
             'inline constexpr bool HasObservedRuntimeMapping = '+str(bool(observed_indices or observed_handles)).lower()+';',

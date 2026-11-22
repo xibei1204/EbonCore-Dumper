@@ -24,8 +24,74 @@ int wmain(int argc,wchar_t** argv) {
     };
     if(argc==4) {
         Options options;options.pakPath=argv[2];options.output=argv[3];options.seconds=10;
-        Hunter hunter(options);
         const auto mode=std::wstring(argv[1]);
+        if(mode==L"chunk")options.seconds=1;
+        Hunter hunter(options);
+        if(mode==L"priority" || mode==L"image_priority" || mode==L"chunk") {
+            const bool priority=mode!=L"chunk";
+            const uint64_t base=priority?uint64_t(1)<<40:0;
+            std::vector<uint8_t> memory(priority?4096:chunkBytes*2);
+            const auto keyOffset=priority?8u:7u;
+            std::memcpy(memory.data()+keyOffset,key,32);
+            unsigned reads=0;
+            const auto read=[&](uint64_t at,void* out,std::size_t n) {
+                ++reads;
+                if(at<base || at-base>memory.size() || n>memory.size()-static_cast<std::size_t>(at-base))return false;
+                if(mode==L"chunk" && at>=chunkBytes)Sleep(1100);
+                std::memcpy(out,memory.data()+static_cast<std::size_t>(at-base),n);return true;
+            };
+            if(priority)hunter.ranges({{0,256u*1024u*1024u,static_cast<DWORD>(mode==L"image_priority"?MEM_PRIVATE:MEM_MAPPED),PAGE_READWRITE},
+                                       {base,memory.size(),static_cast<DWORD>(mode==L"image_priority"?MEM_IMAGE:MEM_PRIVATE),
+                                        static_cast<DWORD>(mode==L"image_priority"?PAGE_READONLY:PAGE_READWRITE)}},read);
+            else hunter.range(base,memory.size(),3,read);
+            hunter.finish();
+            return hunter.result.success && hunter.result.address==base+keyOffset && reads==1 ? 0:2;
+        }
+        if(mode==L"snapshot") {
+            std::vector<uint8_t> memory(12288,0x41);
+            ebon::Module module;module.base=0x10000;module.size=memory.size();module.name=L"fixture.exe";module.path=L"fixture.exe";
+            const auto read=[&](uint64_t at,void* out,std::size_t n) {
+                const auto offset=at-module.base;
+                if(at<module.base || offset>memory.size() || n>memory.size()-static_cast<std::size_t>(offset))return false;
+                if(offset<8192 && offset+n>4096)return false;
+                std::memcpy(out,memory.data()+static_cast<std::size_t>(offset),n);return true;
+            };
+            const auto snapshot=saveModuleSnapshot(options.output,module,{{module.base,module.size,false,false}},read);
+            hunter.finish();
+            return snapshot.copiedBytes==8192 && snapshot.unreadBytes==4096 && !snapshot.timedOut ? 0:2;
+        }
+        if(mode==L"coverage") {
+            std::vector<uint8_t> memory(256u*1024u,0xff);
+            const auto boundary=memory.size()/2;
+            std::memcpy(memory.data()+boundary+8,key,32);
+            const auto read=[&](uint64_t at,void* out,std::size_t n) {
+                if(at>memory.size() || n>memory.size()-static_cast<std::size_t>(at))return false;
+                std::memcpy(out,memory.data()+at,n);return true;
+            };
+            hunter.ranges({{0,boundary,MEM_PRIVATE,PAGE_READWRITE},
+                           {boundary,boundary,MEM_PRIVATE,PAGE_READWRITE}},read);
+            hunter.finish();
+            return hunter.result.success && hunter.result.address==boundary+8 &&
+                   hunter.result.candidates<boundary/4 ? 0:2;
+        }
+        if(mode==L"protection") {
+            auto* memory=static_cast<uint8_t*>(VirtualAlloc(nullptr,12288,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE));
+            if(!memory)return 3;
+            std::memcpy(memory+8199,key,32);
+            DWORD previous=0;
+            if(!VirtualProtect(memory+4096,4096,PAGE_READWRITE|PAGE_GUARD,&previous)) {
+                VirtualFree(memory,0,MEM_RELEASE);return 3;
+            }
+            const ebon::InProcessReader reader;
+            const auto base=reinterpret_cast<uint64_t>(memory);
+            hunter.range(base,12288,3,[&](uint64_t at,void* out,std::size_t n){return reader.copy(at,out,n);});
+            hunter.finish();
+            MEMORY_BASIC_INFORMATION guarded{};
+            const bool guardPreserved=VirtualQuery(memory+4096,&guarded,sizeof(guarded)) && (guarded.Protect&PAGE_GUARD);
+            const bool found=hunter.result.success && hunter.result.address==base+8199 && hunter.result.unreadBytes==4096;
+            VirtualFree(memory,0,MEM_RELEASE);
+            return found && guardPreserved ? 0:2;
+        }
         const auto offset=mode==L"large"?128u*1024u*1024u+53u:8192u+7u;
         std::vector<uint8_t> memory(static_cast<std::size_t>(offset)+64);
         std::memcpy(memory.data()+offset,key,32);

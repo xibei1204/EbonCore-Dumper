@@ -25,7 +25,7 @@ public:
            !ebon::isForegroundForGame(7,7,8)||!ebon::isForegroundForGame(8,7,8)||
            ebon::isForegroundForGame(9,7,8)||ebon::isForegroundForGame(8,7,0))return 31;
         ebon::Config c;c.values={{"module","HTGame.exe"},{"name_pool_rva","0x200"},{"object_array_rva","0x300"}};
-        std::vector<std::string> strings={"None","ByteProperty","IntProperty","BoolProperty","ScriptStruct","Class","Function","Enum","EExample","FExample","Actor","Health","Visible","Extra"};std::map<std::string,std::uint32_t> ids;std::uint32_t cursor=0;
+        std::vector<std::string> strings={"None","ByteProperty","IntProperty","BoolProperty","ScriptStruct","Class","Function","Enum","EExample","FExample","Actor","Health","Visible","Extra","UserDefinedStruct"};std::map<std::string,std::uint32_t> ids;std::uint32_t cursor=0;
         for(std::size_t i=0;i<strings.size();++i){const auto& s=strings[i];ids[s]=cursor/2;auto off=block+cursor;std::uint16_t h=(std::uint16_t)(s.size()<<6);put(off,h);putBytes(off+2,s.data(),s.size());cursor+=(std::uint32_t)((2+s.size()+1)&~1u);}
         put(pool+16,block);put(pool+12,cursor);put(pool+8,std::uint32_t(0));put(array+16,chunks);put(chunks,items);put(array+36,std::int32_t(6));put(array+32,std::int32_t(65536));put(array+44,std::int32_t(1));put(array+40,std::int32_t(1));
         struct O{std::uint64_t p,klass;const char* name;};O objs[]={{objClass,objClass,"Class"},{objStruct,objClass,"ScriptStruct"},{objFunction,objClass,"Function"},{objEnum,objClass,"Enum"},{objExample,objEnum,"EExample"},{objActor,objStruct,"Actor"}};
@@ -39,6 +39,27 @@ public:
         if(!ok||r.types.empty()||!r.propertyCount){for(const auto& e:r.errors)std::cerr<<e<<"\n";return 1;}
         std::ifstream f(output/"types.jsonl",std::ios::binary);std::string text((std::istreambuf_iterator<char>(f)),{});
         if(text.find("\"name\":\"Health\"")==std::string::npos||text.find("\"type\":\"IntProperty\"")==std::string::npos||text.find("\"name\":\"Visible\"")==std::string::npos||text.find("\"size\":4")==std::string::npos)return 2;
+        // MinAlignment occupies the low 16 bits; the upper word belongs to
+        // other metadata and must not discard a valid 8-byte alignment.
+        put(objActor+92,std::uint32_t(0x10008));
+        ebon::Reflection aligned(*this,c,mod);
+        if(!aligned.collect())return 40;
+        const auto alignedActor=std::find_if(aligned.types.begin(),aligned.types.end(),[](const auto& t){return t.name=="Actor";});
+        if(alignedActor==aligned.types.end()||alignedActor->alignment!=8u||alignedActor->headerEvidence.empty())return 41;
+        put(objActor+16,objClass);put(objActor+88,std::int32_t(14));
+        ebon::Reflection classSpan(*this,c,mod);
+        if(!classSpan.collect())return 45;
+        const auto spanActor=std::find_if(classSpan.types.begin(),classSpan.types.end(),[](const auto& t){return t.name=="Actor";});
+        if(spanActor==classSpan.types.end()||spanActor->alignment!=8u||spanActor->size!=14)return 46;
+        put(objActor+16,objStruct);put(objActor+88,std::int32_t(16));
+        put(objActor+92,std::uint32_t(0));
+        put(objStruct+24,ids["UserDefinedStruct"]);put(field+120,objActor);
+        ebon::Reflection userDefined(*this,c,mod);
+        if(!userDefined.collect())return 43;
+        std::string userTarget;std::optional<unsigned> userMask;
+        userDefined.propertyDetail(field,"StructProperty",16,userTarget,userMask,0);
+        if(userTarget!="Actor")return 44;
+        put(objStruct+24,ids["ScriptStruct"]);put(field+120,std::uint64_t(0));
         std::ifstream s(output/"dump_state.json",std::ios::binary);std::string state((std::istreambuf_iterator<char>(s)),{});
         if(state.find("\"layout_verified\":true")==std::string::npos||state.find("\"property_layout_verified\":true")==std::string::npos||state.find("\"status\":\"complete_with_unresolved\"")==std::string::npos||state.find("\"success\":true")==std::string::npos||state.find("BoolProperty mask unavailable") == std::string::npos)return 3;
         auto automatic=output/"automatic";ebon::Config autoConfig;autoConfig.values={{"module","HTGame.exe"},{"name_pool_rva","0"},{"object_array_rva","0"}};ebon::Reflection autoReflection(*this,autoConfig,mod);bool autoOk=autoReflection.collect();autoReflection.write(automatic,autoOk);if(!autoOk||autoReflection.poolAddress()!=pool||autoReflection.objectArrayAddress()!=array)return 4;
@@ -187,10 +208,38 @@ public:
         ebon::Reflection largeNumber(*this,c,mod);
         if(!largeNumber.collect()||largeNumber.objects.back().name!="Actor_2147482645")return 18;
         put(objActor+28,std::uint32_t(0));
+        // GC begins after the inventory was cached. Live SDK traversal must
+        // refresh it, exclude the destroyed type and prune dependent layouts.
+        auto liveConfig=c;liveConfig.values["sdk_live_capture"]="1";
+        liveConfig.values["sdk_max_invalid_type_percent"]="25";
+        for(int i=6;i<30;++i){
+            const auto object=0x65000ull+(std::uint64_t)(i-6)*0x100;
+            put(items+(std::uint64_t)i*24,object);put(object,std::uint64_t(0x10800));
+            put(object+12,std::int32_t(i));put(object+16,objClass);put(object+24,ids["Extra"]);
+            put(object+28,std::uint32_t(i));put(object+80,field);put(object+88,std::int32_t(16));
+        }
+        put(array+36,std::int32_t(30));put(0x65000+64,objExample);
+        put(0x65100+16,objFunction);put(0x65100+32,objExample);
+        put(0x65200+88,std::int32_t(1)); // Correct fields cannot fit this owner.
+        ebon::SnapshotReader livePages(*this);ebon::Reflection live(livePages,liveConfig,mod);
+        live.onProgress=[&](const char* phase,std::uint64_t done,std::uint64_t){
+            if(std::string(phase)=="types"&&!done)put(objExample+8,std::uint32_t(0x8000));
+        };
+        if(!live.collect()||live.excludedTypes.size()!=4||!live.errors.empty()||!live.propertyCount)return 37;
+        for(const auto& type:live.types)if(type.address==objExample||type.address==0x65000||type.address==0x65100||type.address==0x65200)return 38;
+        live.write(output/"live_mutation",true);
+        auto excessiveConfig=liveConfig;excessiveConfig.values["sdk_max_invalid_type_percent"]="0";
+        ebon::Reflection excessive(*this,excessiveConfig,mod);
+        if(excessive.collect()||excessive.errors.empty())return 39;
+        put(objExample+8,std::uint32_t(0));put(array+36,std::int32_t(6));
         put(field+120,objClass);
         std::string pointerTarget;std::optional<unsigned> pointerMask;
         const auto pointerDetail=r.propertyDetail(field,"ObjectProperty",8,pointerTarget,pointerMask,0);
         if(pointerTarget!="Class"||pointerDetail.find("target_offset")==std::string::npos)return 19;
+        put(field+128,objStruct); // Adjacent pointer must not create ambiguous object target semantics.
+        pointerTarget.clear();r.propertyDetail(field,"ObjectProperty",8,pointerTarget,pointerMask,0);
+        if(pointerTarget!="Class")return 42;
+        put(field+128,std::uint64_t(0));
         put(field+120,std::uint64_t(0));
         const std::uint8_t boolMetadata[]={1,0,4,4};
         putBytes(nextField+120,boolMetadata,sizeof(boolMetadata));

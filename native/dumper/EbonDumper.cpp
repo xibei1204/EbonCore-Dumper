@@ -2,6 +2,8 @@
 #include "../common/ebon_console.hpp"
 #include "ebon_aes_hunter.hpp"
 #include "ebon_resource_dump.hpp"
+#include "ebon_rpc_sample_capture.hpp"
+#include "ebon_character_loader.hpp"
 #include "../sdk/ebon_network_version.hpp"
 #include <memory>
 #include <chrono>
@@ -83,8 +85,50 @@ static void validateOutput(const std::filesystem::path& profile,const std::files
 #ifdef EBON_DLL
 #pragma comment(lib, "user32.lib")
 static HMODULE selfModule=nullptr;
+static ebon::rpc_samples::Capture rpcSampleCapture;
 
-static void captureResources(const ebon::Config& config,const ebon::Module& module,
+static bool captureSdk(const ebon::Config& config,const ebon::Module& module,
+                       const std::string& digest,const std::filesystem::path& output,
+                       std::int64_t maxWaitSec) {
+    std::filesystem::create_directories(output);
+    ebon::InProcessReader memory;
+    ebon::SnapshotReader snapshot(memory);
+    auto sdkConfig=config;sdkConfig.values["sdk_live_capture"]="1";
+    ebon::Reflection current(snapshot,sdkConfig,module);
+    current.moduleSha256=digest;
+    const auto deadline=GetTickCount64()+(ULONGLONG)maxWaitSec*1000;
+    current.setDeadline(deadline);
+    ULONGLONG lastProgress=0;
+    current.onProgress=[&](const char* phase,std::uint64_t done,std::uint64_t total){
+        const auto now=GetTickCount64();
+        if(now-lastProgress<1000)return;
+        lastProgress=now;
+        ebon::console::logf("info","F5 SDK %s: %llu/%llu",phase,(unsigned long long)done,(unsigned long long)total);
+        current.writeState(output,false,"collecting");
+    };
+    try {
+        while(GetTickCount64()<deadline){
+            snapshot.reset();
+            if(current.discover()&&current.collect()){
+                current.write(output,true);
+                ebon::saveNetworkVersion(output,ebon::observeNetworkVersion(memory,config,module,digest));
+                ebon::console::logf("success","F5 SDK dump finished: objects=%zu types=%zu properties=%zu output=%s",
+                    current.objects.size(),current.types.size(),current.propertyCount,output.u8string().c_str());
+                return true;
+            }
+            current.writeState(output,false,"waiting");
+            const auto now=GetTickCount64();
+            if(now>=deadline)break;
+            Sleep((DWORD)std::min<ULONGLONG>(1000,deadline-now));
+        }
+        current.errors.push_back("timed out waiting for validated engine reflection");
+    } catch(const std::exception& e){current.errors.push_back(e.what());}
+    current.writeState(output,false,"failed");
+    ebon::console::logf("error","F5 SDK dump failed; diagnostics=%s",(output/"dump_state.json").u8string().c_str());
+    return false;
+}
+
+static bool captureResources(const ebon::Config& config,const ebon::Module& module,
                              const std::string& digest,const std::filesystem::path& output) {
     bool outputOwned=false;
     try {
@@ -195,10 +239,52 @@ static void captureResources(const ebon::Config& config,const ebon::Module& modu
             ok?1:0,(output/"resource_state.json").u8string().c_str());
         ebon::console::logf("info","F10 resource bodies: %s",
             std::filesystem::absolute(output/"data").lexically_normal().u8string().c_str());
+        return ok;
     } catch(const std::exception& e) {
         ebon::console::logf("error","F10 resource capture failed: %s",e.what());
         if(outputOwned)try {ebon::save(output/"resource_state.json","{\"format\":\"EbonResources-v1\",\"status\":\"failed\",\"success\":false,\"error\":"+ebon::quote(e.what())+"}\n");}catch(...){}
+        return false;
     }
+}
+
+static void captureCharacter(const ebon::Config& config,const ebon::Module& module,const std::string& digest,
+                             const ebon::Reflection& reflection,const std::filesystem::path& output,
+                             const std::filesystem::path& request){
+    std::filesystem::path job;std::string id,path;bool owned=false;
+    const auto state=[&](const char* phase,const std::string& error="",std::uint64_t result=0){
+        ebon::save(job/"character_load_state.json","{\"format\":\"EbonCharacterLoad-v1\",\"status\":"+ebon::quote(phase)+
+            ",\"request_id\":"+ebon::quote(id)+",\"character_class\":"+ebon::quote(path)+",\"build_sha256\":"+ebon::quote(digest)+
+            ",\"loaded_class_address\":"+(result?ebon::quote(ebon::hex(result)):"null")+
+            ",\"resources\":\"resources/res_1\",\"client_verified\":false,\"error\":"+(error.empty()?"null":ebon::quote(error))+"}\n");
+    };
+    try{
+        if(std::filesystem::file_size(request)>8192)throw std::runtime_error("Character request exceeds 8 KiB");
+        ebon::Config selected;selected.load(request);id=selected.text("request_id");path=selected.text("class_path");
+        if(id.size()!=32||id.find_first_not_of("0123456789abcdef")!=std::string::npos)throw std::runtime_error("Invalid character request identity");
+        if(selected.text("build_sha256")!=digest||!ebon::character_loader::classPath(path))throw std::runtime_error("Character request build or player class path mismatch");
+        std::filesystem::create_directories(output/"characters");job=output/"characters"/("char_"+id);
+        if(!std::filesystem::create_directory(job))throw std::runtime_error("Character request was already used");
+        owned=true;state("binding");
+        ebon::InProcessReader memory;ebon::character_loader::Loader loader(config);std::string error;
+        if(!loader.bind(memory,reflection,config,module,error))throw std::runtime_error(error);
+        state("waiting_game_thread");
+        ebon::console::log("info","Character capture: loading "+path+" on the named game thread");
+        std::uint64_t loaded=0;
+        if(!loader.load(path,30000,loaded,error))throw std::runtime_error(error);
+        state("exporting","",loaded);
+        auto focused=config;focused.values["resource_character_focus"]=path;
+        focused.values["resource_feature_only"]="1";focused.values["resource_feature_exports"]="1";
+        focused.values["resource_character_max_objects"]="8192";
+        if(!captureResources(focused,module,digest,job/"resources"/"res_1"))
+            throw std::runtime_error("Character resource export failed; inspect resources/res_1/resource_state.json");
+        state("export_finished","",loaded);
+        ebon::console::log("success","Character export finished; inspect the automatic audit for remaining data: "+job.u8string());
+    }catch(const std::exception& error){
+        if(owned)try{state("failed",error.what());}catch(const std::exception& writeError){
+            ebon::console::log("error",std::string("Cannot publish character failure: ")+writeError.what());}
+        ebon::console::log("error",std::string("Character capture failed: ")+error.what());
+    }
+    if(!DeleteFileW(request.c_str()))ebon::console::log("warn","Cannot remove the consumed character request file");
 }
 
 // F9 arms the AES index-key hunt. The dumper terminal reads the key from its own
@@ -249,7 +335,7 @@ static DWORD WINAPI aesHotkeyWorker(LPVOID param) {
     std::filesystem::path running,lastOutput;
     const auto publish=[&](const char* status) {
         try {
-            ebon::save(marker,"{\"format\":\"EbonAesHotkey-v1\",\"status\":"+ebon::quote(status)+
+            ebon_hunter::atomicSave(marker,"{\"format\":\"EbonAesHotkey-v1\",\"status\":"+ebon::quote(status)+
                 ",\"key\":\"F9\",\"terminal_pid\":"+std::to_string(job->terminalPid)+
                 ",\"terminal_available\":"+(terminal?"true":"false")+
                 ",\"presses\":"+std::to_string(presses)+",\"runs\":"+std::to_string(runs)+
@@ -315,6 +401,7 @@ static void startAesHotkey(const ebon::Config& config,const std::filesystem::pat
 static DWORD WINAPI injectedWorker(LPVOID param) {
     std::filesystem::path outputPath;
     bool outputReserved = false;
+    bool sampleRequested = false;
     try {
         wchar_t dllPath[32768]{};
         const auto length = GetModuleFileNameW(reinterpret_cast<HMODULE>(param), dllPath, 32768);
@@ -374,14 +461,18 @@ static DWORD WINAPI injectedWorker(LPVOID param) {
 
         ebon::Config config;
         config.load(profilePath);
+        const bool sdkHotkey=config.number("sdk_hotkey",1)!=0;
+        const auto sdkBodyOutput=std::filesystem::path(ebon::wide(config.text("sdk_output",(dllDir.parent_path()/"out"/"sdk"/"CppSDK").u8string())));
+        sampleRequested=config.number("game_rpc_sample_capture",0)!=0;
         validateOutput(profilePath, outputPath);
         std::filesystem::create_directories(outputPath);
         outputReserved = true;
 
         // The terminal is started only after the capture directory exists: it
-        // owns the F9 hotkey and queues aes_hunt.request inside that directory.
+        // owns F5/F9 and queues their request files inside that directory.
         if(ini.number("console",1)!=0){
-            if(!ebon::console::startViewer(dllDir / "EbonLogConsole.exe",GetCurrentProcessId(),outputPath,&logViewerPid))
+            if(!ebon::console::startViewer(dllDir / "EbonLogConsole.exe",GetCurrentProcessId(),outputPath,&logViewerPid,
+                                         sdkHotkey?sdkBodyOutput:std::filesystem::path()))
                 ebon::console::logf("warn","cannot start standalone log console, Win32=%lu; log=%s",GetLastError(),logPath.u8string().c_str());
         }
 
@@ -398,6 +489,7 @@ static DWORD WINAPI injectedWorker(LPVOID param) {
         if (!expected.empty() && expected != digest)
             throw std::runtime_error("module SHA-256 mismatch; profile does not match the running build");
         ebon::console::logf("success", "module validated: %s sha256=%s", ebon::utf8(mod.name).c_str(), digest.c_str());
+        if(sampleRequested)ebon::console::log("info","[F8] status=initializing | 正在等待反射采集和入口校验，就绪后会明确提示。反射/F10 完成不代表 F8 就绪。");
 
         // Start only after the selected profile and output have passed validation.
         // AES has its own lifetime/deadline and never holds up reflection capture.
@@ -412,7 +504,7 @@ static DWORD WINAPI injectedWorker(LPVOID param) {
             try {
                 startAesHotkey(config,outputPath,logViewerPid);
                 if(logViewerPid)
-                    ebon::console::log("success","F9 AES key hunt armed: press F9 inside this capture's dumper terminal to search the Pak index key. Each run writes aes\\ or aes_N\\");
+                    ebon::console::log("success","F9 AES key hunt armed: press F9 inside this capture's dumper terminal to search the Pak/IoStore key. Each run writes aes\\ or aes_N\\");
                 else
                     ebon::console::log("warn","F9 AES key hunt armed without a dumper terminal (console=0); create aes_hunt.request in the capture directory to start it");
             } catch(const std::exception& e) {
@@ -430,9 +522,48 @@ static DWORD WINAPI injectedWorker(LPVOID param) {
             }
         }
 
+        const auto sdkWaitSec=sdkHotkey?config.number("sdk_timeout_seconds",600):maxWaitSec;
+        if(sdkHotkey&&(sdkWaitSec<1||sdkWaitSec>3600))throw std::runtime_error("SDK capture timeout must be in 1..3600 seconds");
+        const auto sdkRequest=outputPath/"sdk_dump.request";
+        unsigned sdkRuns=0,sdkSerial=0;
+        const auto publishSdk=[&](const char* status,const std::filesystem::path& latest,bool success){
+            if(!sdkHotkey)return;
+            ebon_hunter::atomicSave(outputPath/"sdk_hotkey_state.json",
+                "{\"format\":\"EbonSdkHotkey-v1\",\"status\":"+ebon::quote(status)+",\"key\":\"F5\",\"terminal_pid\":"+
+                std::to_string(logViewerPid)+",\"terminal_available\":"+(logViewerPid?"true":"false")+
+                ",\"runs\":"+std::to_string(sdkRuns)+",\"last_output\":"+ebon::quote(latest.u8string())+
+                ",\"last_success\":"+(success?"true":"false")+"}\n");
+        };
+        const auto finishSdk=[&](const std::filesystem::path& latest,bool success){
+            if(!sdkHotkey)return;
+            // Requests made during collection are discarded, including key repeats.
+            if(GetFileAttributesW(sdkRequest.c_str())!=INVALID_FILE_ATTRIBUTES){
+                if(!DeleteFileW(sdkRequest.c_str()))throw std::runtime_error("cannot discard a pending SDK request");
+                ebon::console::log("info","SDK dump already running; ignored the additional F5 request");
+            }
+            publishSdk("armed",latest,success);
+        };
+        for(;;){
+        if(sdkHotkey){
+            ebon::save(outputPath/"dump_state.json",
+                "{\"format\":\"EbonReflection-v1\",\"status\":\"waiting\",\"phase\":\"sdk_hotkey\",\"success\":false,\"key\":\"F5\",\"terminal_available\":"+
+                std::string(logViewerPid?"true":"false")+"}\n");
+            publishSdk("armed",{},false);
+            ebon::console::log(logViewerPid?"success":"warn",logViewerPid?
+                "F5 Dump SDK armed: press F5 inside this capture's dumper terminal to collect reflection metadata.":
+                "F5 Dump SDK armed without a terminal; create sdk_dump.request in the capture directory to start it.");
+            while(GetFileAttributesW(sdkRequest.c_str())==INVALID_FILE_ATTRIBUTES)Sleep(15);
+            if(!DeleteFileW(sdkRequest.c_str()))throw std::runtime_error("cannot consume the SDK request");
+            ++sdkRuns;
+            publishSdk("running",outputPath,false);
+            ebon::console::log("info","F5 SDK dump started from sdk_dump.request");
+        }
+
         ebon::InProcessReader memory;
         ebon::SnapshotReader snapshot(memory);
-        ebon::Reflection reflection(snapshot, config, mod);
+        auto captureConfig=config;
+        if(sdkHotkey)captureConfig.values["sdk_live_capture"]="1";
+        ebon::Reflection reflection(snapshot, captureConfig, mod);
         reflection.moduleSha256 = digest;
         ebon::NetworkVersionObservation lastVersion;
         bool versionPublished=false;
@@ -456,7 +587,7 @@ static DWORD WINAPI injectedWorker(LPVOID param) {
             reflection.writeState(outputPath,false,"waiting");
             Sleep(1000);
         }
-        const auto deadline = GetTickCount64() + (ULONGLONG)maxWaitSec * 1000;
+        const auto deadline = GetTickCount64() + (ULONGLONG)sdkWaitSec * 1000;
         reflection.setDeadline(deadline);
         ULONGLONG lastProgress = 0;
         std::string lastPhase;
@@ -497,6 +628,16 @@ static DWORD WINAPI injectedWorker(LPVOID param) {
                                             ebon::hex(reflection.poolAddress() - mod.base).c_str(),
                                             ebon::hex(reflection.objectArrayAddress() - mod.base).c_str());
                         snapshot.reset();
+                        reflection.beforeNetworkCollect=[&](){
+                            if(!config.number("game_rpc_sample_capture",0))return;
+                            std::string sampleStatus;
+                            try{
+                                rpcSampleCapture.install(memory,reflection,config,mod,outputPath,sampleStatus);
+                            }catch(const std::exception& e){
+                                try{ebon::save(outputPath/"game_rpc_sample_state.json","{\"format\":\"EbonGameRpcSampleCapture-v1\",\"status\":\"error\",\"hotkey\":\"F8\",\"window_seconds\":30,\"error\":"+ebon::quote(e.what())+",\"wire_packet_bytes_captured\":false}\n");}catch(...){}
+                                ebon::console::logf("warn","[F8] status=error | 采样器初始化失败：%s",e.what());
+                            }
+                        };
                         const bool ok = reflection.collect();
                         ebon::console::logf("info","validated field layout: next=0x%llx name=0x%llx array=0x%llx offset=0x%llx",
                                             (unsigned long long)reflection.layout().fieldNext,(unsigned long long)reflection.layout().fieldName,
@@ -507,22 +648,52 @@ static DWORD WINAPI injectedWorker(LPVOID param) {
                             updateVersion(outputPath,true);
                             ebon::console::logf("success","dump finished: objects=%zu types=%zu properties=%zu success=1 output=%s",
                                                 reflection.objects.size(),reflection.types.size(),reflection.propertyCount,outputPath.u8string().c_str());
+                            finishSdk(outputPath,true);
                             const auto watchSeconds=ini.number("network_watch_seconds",0);
                             const bool resourceHotkey=config.number("resource_hotkey",1)!=0;
+                            const bool sampleEnabled=config.number("game_rpc_sample_capture",0)!=0;
                             const auto versionWatchSeconds=config.number("network_version_watch_seconds",900);
                             if(versionWatchSeconds<0||versionWatchSeconds>3600)throw std::runtime_error("network_version_watch_seconds must be in 0..3600");
                             const bool versionWatch=config.number("network_version_collect",1)&&
                                 config.number("network_version_getter_rva",0)>0&&versionWatchSeconds>0;
                             if(watchSeconds<0||watchSeconds>1800)throw std::runtime_error("network_watch_seconds must be in 0..1800");
-                            if(resourceHotkey||watchSeconds>0||versionWatch){
+                            if(sdkHotkey||resourceHotkey||sampleEnabled||watchSeconds>0||versionWatch){
+                                if(sdkHotkey)ebon::console::log("success","F5 SDK dump ready again; later captures write sdk_snapshot_N without overwriting the first dump.");
                                 if(watchSeconds>0)ebon::console::log("info","network recapture watcher ready; create network_capture.request in the capture directory to take a new snapshot");
                                 if(resourceHotkey)ebon::console::log("success","F10 resource dump ready in the game or its log window: tables, assets, loaded maps/actors/components, script assets and references. Repeat in each scene or feature screen. Offline files: use dump-res. Output: resources/res_N");
                                 const auto until=GetTickCount64()+(ULONGLONG)watchSeconds*1000;
                                 const auto versionUntil=GetTickCount64()+(ULONGLONG)versionWatchSeconds*1000;
-                                ULONGLONG nextVersionCheck=0;
+                                ULONGLONG nextVersionCheck=0,nextRpcSampleFlush=0;
                                 unsigned serial=0,resourceSerial=0;
                                 bool wasF10=(GetAsyncKeyState(VK_F10)&0x8000)!=0;
-                                while(resourceHotkey||GetTickCount64()<until||(versionWatch&&GetTickCount64()<versionUntil)){
+                                bool wasF8=(GetAsyncKeyState(VK_F8)&0x8000)!=0;
+                                if(config.number("character_load_enabled",0)){
+                                    ebon::save(outputPath/"character_loader_ready.json","{\"format\":\"EbonCharacterLoaderReady-v1\",\"process_id\":"+std::to_string(GetCurrentProcessId())+
+                                        ",\"build_sha256\":"+ebon::quote(digest)+",\"enabled\":true}\n");
+                                    ebon::console::log("success","Character loader ready; use capture-character after entering the game scene.");
+                                }
+                                const bool sampleHotkey=rpcSampleCapture.installed();
+                                if(sampleEnabled)rpcSampleCapture.reportStatus();
+                                while(sdkHotkey||resourceHotkey||sampleEnabled||GetTickCount64()<until||(versionWatch&&GetTickCount64()<versionUntil)){
+                                    if(sdkHotkey&&GetFileAttributesW(sdkRequest.c_str())!=INVALID_FILE_ATTRIBUTES){
+                                        if(!DeleteFileW(sdkRequest.c_str()))throw std::runtime_error("cannot consume the SDK request");
+                                        std::filesystem::path sdkOutput;
+                                        do{sdkOutput=outputPath/("sdk_snapshot_"+std::to_string(++sdkSerial));}
+                                        while(std::filesystem::exists(sdkOutput));
+                                        ++sdkRuns;
+                                        publishSdk("running",sdkOutput,false);
+                                        bool sdkOk=false;
+                                        try{sdkOk=captureSdk(config,mod,digest,sdkOutput,sdkWaitSec);}
+                                        catch(const std::exception& e){ebon::console::logf("error","F5 SDK dump failed: %s",e.what());}
+                                        finishSdk(sdkOutput,sdkOk);
+                                    }
+                                    const auto characterRequest=outputPath/"character_capture.request";
+                                    if(config.number("character_load_enabled",0)&&GetFileAttributesW(characterRequest.c_str())!=INVALID_FILE_ATTRIBUTES)
+                                        captureCharacter(config,mod,digest,reflection,outputPath,characterRequest);
+                                    if(rpcSampleCapture.installed()&&GetTickCount64()>=nextRpcSampleFlush){
+                                        nextRpcSampleFlush=GetTickCount64()+500;
+                                        try{rpcSampleCapture.pollRequest();rpcSampleCapture.flush();}catch(const std::exception& e){ebon::console::logf("warn","Game RPC sample flush failed: %s",e.what());}
+                                    }
                                     if(versionWatch&&GetTickCount64()<versionUntil&&GetTickCount64()>=nextVersionCheck){
                                         nextVersionCheck=GetTickCount64()+1000;
                                         try{updateVersion(outputPath,false);}
@@ -532,6 +703,14 @@ static DWORD WINAPI injectedWorker(LPVOID param) {
                                     GetWindowThreadProcessId(GetForegroundWindow(),&foregroundPid);
                                     const SHORT f10State=GetAsyncKeyState(VK_F10);
                                     const bool pressedEdge=ebon::keyPressedEdge(f10State,wasF10);
+                                    const SHORT f8State=GetAsyncKeyState(VK_F8);
+                                    const bool f8Pressed=ebon::keyPressedEdge(f8State,wasF8);
+                                    if(sampleHotkey&&f8Pressed&&ebon::isForegroundForGame(foregroundPid,GetCurrentProcessId(),logViewerPid)){
+                                        try{rpcSampleCapture.arm();}
+                                        catch(const std::exception& e){ebon::console::logf("warn","cannot arm F8 sampler: %s",e.what());}
+                                    }
+                                    if(sampleEnabled&&!sampleHotkey&&f8Pressed&&ebon::isForegroundForGame(foregroundPid,GetCurrentProcessId(),logViewerPid))
+                                        rpcSampleCapture.reportStatus();
                                     const auto resourceRequest=outputPath/"resource_capture.request";
                                     const bool requested=resourceHotkey&&GetFileAttributesW(resourceRequest.c_str())!=INVALID_FILE_ATTRIBUTES;
                                     const bool validForeground=ebon::isForegroundForGame(foregroundPid,GetCurrentProcessId(),logViewerPid);
@@ -593,9 +772,19 @@ static DWORD WINAPI injectedWorker(LPVOID param) {
         if(!reflection.objects.empty())reflection.write(outputPath,false);
         else reflection.writeState(outputPath,false,"failed");
         ebon::console::log("error", "capture failed; diagnostics saved to dump_state.json");
+        if(sdkHotkey){
+            const auto diagnostic=outputPath/("dump_state.failed_"+std::to_string(sdkRuns)+".json");
+            CopyFileW((outputPath/"dump_state.json").c_str(),diagnostic.c_str(),TRUE);
+            finishSdk(outputPath,false);
+            ebon::console::log("warn","SDK capture failed; diagnostics retained. Press F5 again to retry in this session.");
+            continue;
+        }
+        if(sampleRequested)ebon::console::log("error","[F8] status=reflection_capture_failed | 反射采集失败，F8 不可用；请查看 dump_state.json。");
         return 2;
+        }
     } catch (const std::exception& e) {
         ebon::console::logf("error", "capture failed: %s", e.what());
+        if(sampleRequested)ebon::console::logf("error","[F8] status=error | 采集线程异常退出，F8 不可用：%s",e.what());
         if (outputReserved) {
             try {
                 ebon::save(outputPath / "dump_state.json",
@@ -606,6 +795,7 @@ static DWORD WINAPI injectedWorker(LPVOID param) {
         return 1;
     } catch (...) {
         ebon::console::log("error", "unexpected worker exception");
+        if(sampleRequested)ebon::console::log("error","[F8] status=error | 采集线程异常退出，F8 不可用。");
         return 1;
     }
 }

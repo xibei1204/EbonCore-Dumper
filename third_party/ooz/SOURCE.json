@@ -1,0 +1,14 @@
+{
+  "repository": "https://github.com/powzix/ooz",
+  "commit": "05038060aa68f9187ae9923b2388ca8db40e58d1",
+  "license": "GPL-3.0-or-later",
+  "hash_basis": "Upstream raw bytes before Git line-ending normalization",
+  "files": {
+    "kraken.cpp": "20c48a30db54efa7681f8c9c674f2a16f081373872d033885a6fdf244b9cff01",
+    "lzna.cpp": "8fc3fa71d814918f4a286d076c38a155ae8d93375281d796e2feba8ab866c712",
+    "bitknit.cpp": "6e448d52fe485032e8b7aaf3efff2f0efd6394c776d0c6b14f91d2e1d286ed73",
+    "stdafx.h": "92b798615ee1ac90ed53a2685fc62dfbe7133d5ba69e567733d8081d420cf701",
+    "targetver.h": "7f988ed4cd4fe1acdede1f014931a08c508cc82f9407bc2b869ec2195c10c9c9",
+    "README.md": "7615f1e802e7865a9b7e6bb8f2df246679cee71d3bcb93319d1eeb184aa8f722"
+  }
+}

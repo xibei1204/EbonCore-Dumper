@@ -1,0 +1,52 @@
+{
+  "format": "EbonCharacterLoaderContract-v1",
+  "module_sha256": "64ed3cae0b5fc61f3b56cdd933b4807cb23f0ec7913590db60d1a8642de2dfec",
+  "analysis_sha256": "7d89c3f9e02896908e4cf55efa1c2c50a828c829d0673740dbabcbd33a3546cc",
+  "entries": [
+    {
+      "name": "make_soft_class_path",
+      "rva": "0x4460850",
+      "prefix_hex": "48895c24084889742410574883ec5033",
+      "prefix_sha256": "b77008611f450452d294efa5064580b4919f9e2cbcbb1d5b22639f8d530dbd81",
+      "purpose": "MakeSoftClassPath exec thunk: FString input and 32-byte FSoftClassPath return"
+    },
+    {
+      "name": "load_class_asset",
+      "rva": "0x445d280",
+      "prefix_hex": "48895c2408488974241855574156488d",
+      "prefix_sha256": "ce1f853e32489283e91becc3ce07c4361a6699fd16470ddfb3fb423c5dd7ca9f",
+      "purpose": "LoadClassAsset_Blocking exec thunk: 40-byte TSoftClassPtr input and UClass return"
+    },
+    {
+      "name": "process_event",
+      "rva": "0x18d4d20",
+      "prefix_hex": "4055565741544155415641574881ec00",
+      "prefix_sha256": "b2cadac22642ba9fdb23d0598a9c582b50d0bb32310aee74ea06302c5bc9a9a0",
+      "purpose": "UObject ProcessEvent root entry previously observed in native vtable slot 76"
+    }
+  ],
+  "parameter_size": 48,
+  "soft_class_size": 40,
+  "soft_path_offset": 8,
+  "return_offset": 40,
+  "process_event_vtable_index": 76,
+  "thread_binding": [
+    "visible UnrealWindow owned by this process",
+    "window thread description exactly GameThread",
+    "WH_GETMESSAGE callback current thread matches selected window thread"
+  ],
+  "execution": [
+    "opt_in_new_profile",
+    "single_user_selected_class",
+    "load_on_matching_thread",
+    "refresh_reflection_after_loading",
+    "export_bodies",
+    "revalidate_network_bytes",
+    "audit_character"
+  ],
+  "boundaries": [
+    "no actor spawn, possession, network request, anti-cheat change or installation write",
+    "loading a class is not evidence of its replication layout",
+    "timeout cancels a queued request before execution; running engine calls are not forcibly interrupted"
+  ]
+}

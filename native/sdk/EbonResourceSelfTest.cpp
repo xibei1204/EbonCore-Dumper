@@ -1,5 +1,6 @@
 // Exercises resource values and native sparse containers without a game process.
 #include "../dumper/ebon_resource_dump.hpp"
+#include "../dumper/ebon_rpc_sample_capture.hpp"
 #include <cassert>
 
 namespace {
@@ -13,12 +14,225 @@ std::string contents(const std::filesystem::path& path) {
     return std::string((std::istreambuf_iterator<char>(file)),{});
 }
 
+volatile LONG samplerRootCalls=0,samplerOverrideCalls=0,samplerNativeCalls=0;
+std::uint64_t samplerRpcFunction=0,samplerFogFunction=0;
+void __fastcall samplerNative(void*,void*,void* result) {
+    InterlockedIncrement(&samplerNativeCalls);if(result)*static_cast<int*>(result)=77;
+}
+void invokeSamplerNative(void* object,std::uint64_t function,void* params,void* result=nullptr,std::uint64_t code=0) {
+    using Event=void(__fastcall*)(void*,void*,void*);
+    alignas(8) std::array<std::uint64_t,20> frame{};
+    frame[2]=function;frame[3]=reinterpret_cast<std::uint64_t>(object);frame[4]=code;
+    frame[5]=reinterpret_cast<std::uint64_t>(params);frame[18]=function;
+    const auto slot=reinterpret_cast<std::uint64_t*>(function+216);
+    reinterpret_cast<Event>(*slot)(object,frame.data(),result);
+}
+void* samplerLastObject=nullptr;void* samplerLastFunction=nullptr;void* samplerLastParams=nullptr;
+void __fastcall samplerRoot(void* object,void* function,void* params) {
+    InterlockedIncrement(&samplerRootCalls);
+    samplerLastObject=object;samplerLastFunction=function;samplerLastParams=params;
+}
+void __fastcall samplerOverride(void* object,void* function,void* params) {
+    InterlockedIncrement(&samplerOverrideCalls);samplerRoot(object,function,params);
+    const auto address=reinterpret_cast<std::uint64_t>(function);
+    if(address==samplerRpcFunction||address==samplerFogFunction)invokeSamplerNative(object,address,params);
+}
+
+void testRpcSamplerBinding(const std::filesystem::path& output) {
+    static ebon::InProcessReader memory;
+    const auto module=ebon::findModule(GetCurrentProcessId(),L"");
+    const auto root=reinterpret_cast<std::uint64_t>(&samplerRoot),derived=reinterpret_cast<std::uint64_t>(&samplerOverride);
+    ebon::Config config;config.values={{"game_rpc_sample_capture","1"},{"exe_sha256","fixture"},
+        {"process_event_vtable_index","76"},{"process_event_rva",ebon::hex(root-module.base)}};
+    ebon::Reflection reflection(memory,config,module);reflection.moduleSha256="fixture";
+    std::string rootTable="{\"object\":\"/Script/CoreUObject.Default__Object\",\"entries\":[";
+    for(unsigned i=0;i<=76;++i){if(i)rootTable+=',';rootTable+=i==76?ebon::quote(ebon::hex(root-module.base)):"null";}
+    reflection.runtimeVtables.push_back(rootTable+"]}");
+    constexpr std::uint64_t ownerAddress=0x50000;
+    alignas(8) static std::array<std::uint64_t,32> rpcFunction{},fogFunction{};
+    const auto rpcAddress=reinterpret_cast<std::uint64_t>(rpcFunction.data()),fogAddress=reinterpret_cast<std::uint64_t>(fogFunction.data());
+    samplerRpcFunction=rpcAddress;samplerFogFunction=fogAddress;
+    rpcFunction[27]=fogFunction[27]=reinterpret_cast<std::uint64_t>(&samplerNative);
+    const auto addType=[&](const char* kind,const char* path,int size,std::uint64_t address){
+        ebon::Type t;t.kind=kind;t.path=path;t.size=size;t.address=address;return t;
+    };
+    const auto field=[](const char* name,const char* type,int offset,int size,const char* target=""){
+        ebon::Property p;p.name=name;p.type=type;p.offset=offset;p.element=size;p.array=1;p.target=target;return p;
+    };
+    auto owner=addType("class","/Script/HTGame.HTPlayerState",64,ownerAddress);
+    auto rpc=addType("function","/Script/HTGame.HTPlayerState.ClientGameDataRPC",32,rpcAddress);rpc.parameterSize=std::uint16_t(32);
+    rpc.nativeRva=reinterpret_cast<std::uint64_t>(&samplerNative)-module.base;
+    rpc.fields={field("InMsgID","IntProperty",0,4),field("InParameters","StructProperty",8,24,"/Script/HottaFramework.ParameterWrapperArray")};
+    auto params=addType("struct","/Script/HottaFramework.ParameterWrapperArray",24,0x61000);
+    auto array=field("ParameterWrappers","ArrayProperty",0,16);
+    array.detail="{\"inner\":{\"type\":\"StructProperty\",\"size\":32,\"target\":\"/Script/HottaFramework.ParameterWrapper\"}}";
+    params.fields={array,field("ReadParameterIndex","IntProperty",16,4)};
+    auto wrapper=addType("struct","/Script/HottaFramework.ParameterWrapper",32,0x62000);
+    auto binary=field("BinaryData","ArrayProperty",16,16);binary.detail="{\"inner\":{\"type\":\"ByteProperty\"}}";
+    wrapper.fields={field("TypeInfo","StructProperty",0,12,"/Script/HottaFramework.ParameterTypeInfo"),binary};
+    auto info=addType("struct","/Script/HottaFramework.ParameterTypeInfo",12,0x63000);
+    info.fields={field("Type","EnumProperty",0,1),field("CustomTypeName","NameProperty",4,8)};
+    auto fog=addType("function","/Script/HTGame.HTPlayerState.OnRecChange_MiniMapFogRec",64,fogAddress);fog.parameterSize=std::uint16_t(64);fog.nativeRva=rpc.nativeRva;
+    fog.fields={field("RecordName","StrProperty",0,16),field("ChangeType","IntProperty",16,4),field("RowIndex","IntProperty",20,4),field("OldRow","StructProperty",24,40)};
+    reflection.types={owner,rpc,params,wrapper,info,fog};
+    auto message=addType("struct","/Script/HottaFramework.HottaRpcMessage",32,0x64000);message.super=params.path;
+    message.fields={field("Type","IntProperty",24,4)};
+    auto dataLayer=addType("function","/Script/HTGame.HTPlayerState.ClientDataLayerRPC",32,0x65000);dataLayer.parameterSize=std::uint16_t(32);
+    dataLayer.fields={field("InMessage","StructProperty",0,32,message.path.c_str())};
+    auto common=addType("function","/Script/HTGame.HTPlayerState.ClientCommonFunRPC",40,0x66000);common.parameterSize=std::uint16_t(40);
+    common.fields={field("InMessage","StructProperty",0,32,message.path.c_str()),field("InTargetActor","ObjectProperty",32,8,"/Script/Engine.Actor")};
+    auto propertiesRpc=addType("function","/Script/HTGame.HTPlayerState.SendReplicatedObjectPropertyArrayToClient",16,0x67000);propertiesRpc.parameterSize=std::uint16_t(16);
+    auto containers=field("InObjectPropertyContainerArray","ArrayProperty",0,16);
+    containers.detail="{\"inner\":{\"type\":\"StructProperty\",\"size\":96,\"target\":\"/Script/HTGame.HTReplicatedObjectPropertyContainer\"}}";
+    propertiesRpc.fields={containers};
+    auto propertyBase=addType("struct","/Script/HottaFramework.HottaReplicatedObjectPropertyContainer",32,0x68000);
+    auto properties=field("Properties","ArrayProperty",8,16);properties.detail="{\"inner\":{\"type\":\"StructProperty\",\"size\":32,\"target\":\"/Script/HottaFramework.HottaReplicatedObjectProperty\"}}";
+    propertyBase.fields={properties,field("Owner","ObjectProperty",24,8,"/Script/CoreUObject.Object")};
+    auto propertyContainer=addType("struct","/Script/HTGame.HTReplicatedObjectPropertyContainer",96,0x69000);propertyContainer.super=propertyBase.path;
+    propertyContainer.fields={field("GameplayModuleId","NameProperty",84,8)};
+    auto propertyValue=addType("struct","/Script/HottaFramework.HottaReplicatedObjectProperty",32,0x6a000);
+    auto byteData=field("Datas","ArrayProperty",8,16);byteData.detail="{\"inner\":{\"type\":\"ByteProperty\",\"size\":1}}";
+    auto compressed=field("bCompressed","BoolProperty",24,1);compressed.boolMask=255;
+    propertyValue.fields={field("Name","NameProperty",0,8),byteData,compressed};
+    for(const auto& t:{message,dataLayer,common,propertiesRpc,propertyBase,propertyContainer,propertyValue})reflection.types.push_back(t);
+    config.values["game_rpc_sync_capture"]="1";
+    const auto propertiesLayout=ebon::rpc_samples::replicatedPropertiesLayout(&propertiesRpc,&propertyContainer,&propertyBase,&propertyValue);
+    require(propertiesLayout.verified,"observed replicated-property schema was not recognized");
+    auto invalidProperty=propertyValue;invalidProperty.fields[1].offset=16;
+    require(!ebon::rpc_samples::replicatedPropertiesLayout(&propertiesRpc,&propertyContainer,&propertyBase,&invalidProperty).verified,
+            "incorrect replicated-property array offset was accepted");
+    ebon::rpc_samples::RpcLayout commonLayout;
+    require(ebon::rpc_samples::friendRpcLayout(&common,&message,&params,&wrapper,&info,commonLayout,true)&&commonLayout.size==40,
+            "observed common-function RPC schema was rejected");
+    auto invalidCommon=common;invalidCommon.fields[1].offset=24;
+    require(!ebon::rpc_samples::friendRpcLayout(&invalidCommon,&message,&params,&wrapper,&info,commonLayout,true),
+            "incorrect common-function actor offset was accepted");
+    alignas(8) static std::array<std::uint64_t,96> table{};table[76]=derived;
+    alignas(8) static std::uint64_t object=reinterpret_cast<std::uint64_t>(table.data());
+    ebon::Object cdo;cdo.address=reinterpret_cast<std::uint64_t>(&object);cdo.klass=ownerAddress;
+    cdo.name="Default__HTPlayerState";cdo.path="/Script/HTGame.Default__HTPlayerState";
+    reflection.objects={cdo};
+    ebon::console::setLogFile(output/"rpc-binding.log");
+    std::string status;
+    {
+        ebon::rpc_samples::Capture rejected;
+        require(!rejected.install(memory,reflection,config,module,output/"rpc-binding-rejected",status)&&
+                status=="no_verified_playerstate_vtable"&&table[76]==derived,
+                "unlisted PlayerState override was accepted or modified");
+        const auto state=contents(output/"rpc-binding-rejected"/"game_rpc_sample_state.json");
+        require(state.find("\"installed\":false")!=state.npos&&state.find("\"observed_target\":"+ebon::quote(ebon::hex(derived)))!=state.npos,
+                "failed binding lost its actual target diagnostics");
+    }
+    config.values["process_event_playerstate_rva"]=ebon::hex(derived-module.base);
+    {
+        auto bad=config;bad.values["process_event_rva"]=ebon::hex(derived-module.base);
+        ebon::rpc_samples::Capture rejected;
+        require(!rejected.install(memory,reflection,bad,module,output/"rpc-root-rejected",status)&&
+                status=="process_event_root_vtable_mismatch"&&table[76]==derived,
+                "PlayerState override bypassed root UObject binding verification");
+    }
+    auto shared=cdo;shared.name="Default__SharedPlayerState";shared.path="/Script/Fixture.Default__SharedPlayerState";
+    reflection.objects.push_back(shared);
+    config.values["game_rpc_native_capture"]="1";config.values["function_native_offset"]="216";
+    config.values["game_rpc_native_rpc_rva"]=config.values["game_rpc_native_fog_rva"]=ebon::hex(*rpc.nativeRva);
+    config.values["game_rpc_frame_node_offset"]="16";config.values["game_rpc_frame_object_offset"]="24";
+    config.values["game_rpc_frame_code_offset"]="32";config.values["game_rpc_frame_locals_offset"]="40";
+    config.values["game_rpc_frame_current_function_offset"]="144";
+    config.values["game_rpc_sample_auto_arm"]="1";config.values["game_rpc_sample_window_seconds"]="1";
+    static ebon::rpc_samples::Capture capture;
+    const auto folder=output/"rpc-binding";
+    require(capture.install(memory,reflection,config,module,folder,status)&&status=="ready_press_f8"&&table[76]!=derived,
+            "verified inherited PlayerState event override could not be installed");
+    require(contents(folder/"game_rpc_sample_state.json").find("\"hooked_vtables\":1")!=std::string::npos,
+            "shared PlayerState vtable was patched more than once");
+    using Event=void(__fastcall*)(void*,void*,void*);
+    alignas(8) std::array<std::uint8_t,32> data{};const std::int32_t messageId=7;std::memcpy(data.data(),&messageId,4);
+    const auto invoke=[&](std::uint64_t function){reinterpret_cast<Event>(table[76])(&object,reinterpret_cast<void*>(function),data.data());};
+    require(contents(folder/"game_rpc_sample_state.json").find("\"status\":\"armed\"")!=std::string::npos,
+            "automatic startup sampling did not arm the window");
+    invokeSamplerNative(&object,rpcAddress,data.data());capture.flush();
+    require(contents(folder/"game_rpc_samples.jsonl").find("UFunction_native_parameters")!=std::string::npos,
+            "direct native invocation bypassing ProcessEvent was not captured");
+    Sleep(1100);capture.flush();
+    require(contents(folder/"game_rpc_sample_state.json").find("\"status\":\"window_expired\"")!=std::string::npos,
+            "automatic sampling window did not expire");
+    invoke(rpcAddress);capture.flush();
+    auto expiredSamples=contents(folder/"game_rpc_samples.jsonl");
+    require(std::count(expiredSamples.begin(),expiredSamples.end(),'\n')==1,"expired sampler recorded a call");
+    capture.arm();invoke(rpcAddress);invoke(rpcAddress+8);capture.flush();
+    require(samplerOverrideCalls==3&&samplerRootCalls==3&&samplerLastObject==&object&&
+            samplerLastFunction==reinterpret_cast<void*>(rpcAddress+8)&&samplerLastParams==data.data(),
+            "sampler skipped the inherited override or changed forwarded arguments");
+    auto samples=contents(folder/"game_rpc_samples.jsonl");
+    require(std::count(samples.begin(),samples.end(),'\n')==2&&samples.find("\"message_id\":7")!=samples.npos,
+            "dual entry sampling duplicated the same RPC invocation");
+    capture.arm();invoke(rpcAddress);capture.flush();capture.reportStatus();
+    int result=0;invokeSamplerNative(&object,rpcAddress,data.data(),&result);capture.flush();
+    require(result==77,"native result pointer was not forwarded to the original function");
+    alignas(8) std::array<std::uint8_t,64> fogData{};const wchar_t fogName[]=L"FogRecord_001";
+    constexpr auto nameLength=static_cast<std::int32_t>(sizeof(fogName)/sizeof(wchar_t));
+    const ebon::rpc_samples::ArrayHeader header{reinterpret_cast<std::uint64_t>(fogName),nameLength,nameLength};
+    std::memcpy(fogData.data(),&header,sizeof(header));invokeSamplerNative(&object,fogAddress,fogData.data());capture.flush();
+    const auto beforeRejects=contents(folder/"game_rpc_samples.jsonl");
+    invokeSamplerNative(&object,rpcAddress,data.data(),nullptr,1);
+    const std::int32_t badCount=-1;std::memcpy(data.data()+16,&badCount,4);
+    invokeSamplerNative(&object,rpcAddress,data.data());Sleep(1100);capture.flush();
+    require(contents(folder/"game_rpc_samples.jsonl")==beforeRejects&&samplerNativeCalls==8,
+            "invalid native frames/parameters were recorded or the original function was not forwarded");
+    const auto state=contents(folder/"game_rpc_sample_state.json");
+    require(state.find("\"window_samples\":3")!=state.npos&&state.find("\"captured_total\":5")!=state.npos,
+            "rearming did not preserve totals while resetting the window count");
+    ebon::save(folder/"legacy_sampling_state.json",state);
+    capture.arm();
+    alignas(8) std::array<std::uint8_t,32> syncWrapper{};syncWrapper[0]=14;
+    const std::uint8_t syncPayload[]={0xaa,0xbb,0xcc};
+    const ebon::rpc_samples::SyncArray payloadHeader{reinterpret_cast<std::uint64_t>(syncPayload),3,3};
+    std::memcpy(syncWrapper.data()+16,&payloadHeader,16);
+    alignas(8) std::array<std::uint8_t,40> syncMessage{};
+    const ebon::rpc_samples::SyncArray wrappersHeader{reinterpret_cast<std::uint64_t>(syncWrapper.data()),1,1};
+    std::memcpy(syncMessage.data(),&wrappersHeader,16);std::int32_t messageType=21;
+    std::memcpy(syncMessage.data()+24,&messageType,4);
+    const auto syncInvoke=[&](std::uint64_t function,void* parameters){reinterpret_cast<Event>(table[76])(&object,reinterpret_cast<void*>(function),parameters);};
+    syncInvoke(dataLayer.address,syncMessage.data());
+    messageType=22;std::memcpy(syncMessage.data()+24,&messageType,4);
+    const std::uint64_t actor=0x12345678;std::memcpy(syncMessage.data()+32,&actor,8);
+    syncInvoke(common.address,syncMessage.data());
+    alignas(8) std::array<std::uint8_t,96> containerBytes{};
+    alignas(8) std::array<std::uint8_t,32> propertyBytes{};
+    const ebon::rpc_samples::SyncArray propertiesHeader{reinterpret_cast<std::uint64_t>(propertyBytes.data()),1,1};
+    std::memcpy(containerBytes.data()+8,&propertiesHeader,16);std::memcpy(containerBytes.data()+24,&actor,8);
+    const ebon::rpc_samples::SyncName propertyName{1234,0},moduleName{5678,0};
+    std::memcpy(containerBytes.data()+84,&moduleName,8);std::memcpy(propertyBytes.data(),&propertyName,8);
+    std::memcpy(propertyBytes.data()+8,&payloadHeader,16);propertyBytes[24]=1;
+    ebon::rpc_samples::SyncArray containerHeader{reinterpret_cast<std::uint64_t>(containerBytes.data()),1,1};
+    syncInvoke(propertiesRpc.address,&containerHeader);capture.flush();
+    std::string truncated;
+    require(ebon::rpc_samples::captureReplicatedProperties(memory,reinterpret_cast<std::uint64_t>(&containerHeader),propertiesLayout,
+            actor,propertiesRpc.address,999,1,2,0,nullptr,"fixture",truncated)&&truncated.find("\"truncated\":true")!=truncated.npos&&
+            truncated.find("\"captured_payload_hex\":\"aabb\"")!=truncated.npos,"replicated-property payload budget was not enforced");
+    ebon::save(folder/"replicated_truncated.json",truncated);
+    const std::int32_t negative=-1;std::memcpy(propertyBytes.data()+16,&negative,4);
+    const auto beforeInvalid=contents(folder/"game_rpc_samples.jsonl");
+    syncInvoke(propertiesRpc.address,&containerHeader);Sleep(1100);capture.flush();
+    require(contents(folder/"game_rpc_samples.jsonl")==beforeInvalid,"invalid replicated-property payload was recorded");
+    const auto syncState=contents(folder/"game_rpc_sample_state.json");
+    require(syncState.find("\"window_samples\":3")!=syncState.npos&&syncState.find("\"sync_samples_total\":3")!=syncState.npos&&
+            syncState.find("\"window_parse_rejected\":1")!=syncState.npos&&syncState.find("\"captured_total\":8")!=syncState.npos,
+            "observed sync routes did not capture data independently of the absent legacy targets");
+    const auto log=contents(output/"rpc-binding.log");
+    require(log.find("[F8] status=no_verified_playerstate_vtable")!=log.npos&&
+            log.find("[F8] status=ready_press_f8")!=log.npos&&log.find("[F8] status=armed")!=log.npos&&
+            log.find("[F8] status=capturing")!=log.npos,
+            "console log omitted a sampler failure or state transition");
+    ebon::console::setLogFile({});
+}
+
 class Fixture final:public ebon::MemoryReader {
     static constexpr std::uint64_t base=0x10000;
-    std::vector<std::uint8_t> bytes_=std::vector<std::uint8_t>(0x200000);
+    std::vector<std::uint8_t> bytes_=std::vector<std::uint8_t>(0x1000000);
     std::map<std::string,std::uint32_t> names_;
     std::map<std::string,std::uint64_t> fieldClasses_;
-    std::uint64_t nextField_=0x90000,nextString_=0x150000;
+    std::uint64_t nextField_=0x90000,nextString_=0x800000;
 public:
     static constexpr std::uint64_t module=0x10000,pool=0x10200,array=0x10300;
     static constexpr std::uint64_t block=0x30000,chunks=0x40000,items=0x41000;
@@ -320,15 +534,22 @@ public:
                     property("BelongsGameplayAreaID","NameProperty",24,8),
                     property("DefaultUnlock","BoolProperty",32,1)};
         const unsigned char boolean[]={1,0,1,255};putBytes(row.fields[2].address+120,boolean,4);
-        reflection.types={dataAsset,table,asset,row};
-        constexpr std::uint64_t miniTableObject=0xa3600,miniAssetObject=0xa3800,miniRowItems=0x130000,miniRowData=0x140000;
+        auto fogRecord=type(0x85400,"/Script/HTGame.MiniMapFogRecord",8,"","struct");
+        fogRecord.fields={property("FogID","IntProperty",0,4)};
+        reflection.types={dataAsset,table,asset,row,fogRecord};
+        constexpr std::uint64_t miniTableObject=0xa3600,miniAssetObject=0xa3800,
+            fogRecordTableObject=0xa3a00,miniRowItems=0x130000,miniRowData=0x140000,
+            fogRecordItems=0x170000,fogRecordData=0x180000;
         reflection.objects={
             {400,miniTableObject,table.address,"DT_MiniMapFogBlock","DataTable","/Game/DataTable/DT_MiniMapFogBlock.DT_MiniMapFogBlock"},
+            {402,fogRecordTableObject,table.address,"DT_MiniMapFogRecord","DataTable","/Game/DataTable/MiniMap/DT_MiniMapFogRecord.DT_MiniMapFogRecord"},
             {401,miniAssetObject,asset.address,"Default__MiniMapDataAsset","MiniMapDataAsset","/Script/HTGame.Default__MiniMapDataAsset"}
         };
         for(const auto& objectRecord:reflection.objects)object(objectRecord.address,objectRecord.klass,objectRecord.index,objectRecord.name);
         put(miniTableObject+40,row.address);put(miniAssetObject+40,miniTableObject);
+        put(fogRecordTableObject+40,fogRecord.address);put(fogRecordData,std::int32_t(77));
         sparseMap(miniTableObject+48,miniRowItems,1,{0});fname(miniRowItems,"FogBlock_001");put(miniRowItems+8,miniRowData);
+        sparseMap(fogRecordTableObject+48,fogRecordItems,1,{0});fname(fogRecordItems,"FogRecord_001");put(fogRecordItems+8,fogRecordData);
         fstring(miniRowData+8,L"XL_map_bigworld");fname(miniRowData+24,"GameplayArea_01");put(miniRowData+32,std::uint8_t(1));
     }
     void sceneResources(ebon::Reflection& reflection) {
@@ -577,6 +798,43 @@ int run(const std::filesystem::path& output) {
                 "menu/default noise starved a configuration or its dependencies");
         require(contents(folder/"feature_exports"/"priority_capture.json").find("\"object_limit_reached\":true")!=std::string::npos,
                 "bounded priority capture hid its missing candidates");
+        // Character roots have their own budget, and all roots precede even
+        // the first root's dependency closure. Broad battle slots may be full.
+        auto characterConfig=limited;characterConfig.values["resource_character_max_objects"]="2";
+        characterConfig.values["resource_battle_max_objects"]="1";
+        auto playerBase=priorityReflection.types[11];
+        playerBase.address=0x86000;playerBase.path="/Script/HTGame.HTPlayerCharacter";
+        priorityReflection.types.push_back(playerBase);
+        for(auto& type:priorityReflection.types)if(type.address==hero.klass)type.super=playerBase.path;
+        ebon::resources::Dumper characterDumper(priorityMemory,priorityReflection,characterConfig,output/"player-priorities");
+        require(characterDumper.run(),"independent player-root capture failed");
+        const auto playerManifest=contents(output/"player-priorities"/"resource_manifest.jsonl");
+        require(playerManifest.find(hero.path)!=std::string::npos&&playerManifest.find(noise.path)!=std::string::npos,
+                "player roots were starved by a dependency or the broad battle budget");
+        require(contents(output/"player-priorities"/"feature_exports"/"priority_capture.json").find("\"characters\":{\"candidates\":2,\"visited\":2")!=std::string::npos,
+                "player-root budget was not reported independently");
+        auto focusedConfig=characterConfig;focusedConfig.values["resource_character_focus"]="/Game/Characters/BP_Hero.BP_Hero_C";
+        ebon::resources::Dumper focusedDumper(priorityMemory,priorityReflection,focusedConfig,output/"player-focused");
+        require(focusedDumper.run(),"focused player capture failed");
+        const auto focusedManifest=contents(output/"player-focused"/"resource_manifest.jsonl");
+        require(focusedManifest.find(hero.path)!=std::string::npos&&focusedManifest.find("DA_SystematicGameFeatures")==std::string::npos&&
+                focusedManifest.find("DA_CharacterCombat")==std::string::npos,
+                "focused character request still used unrelated broad menu/battle roots");
+        const auto characterTableBefore=priorityReflection.objects[2];
+        auto& characterTable=priorityReflection.objects[2];
+        characterTable.name="DT_Character";characterTable.path="/Game/DataTable/Character/DT_Character.DT_Character";
+        priorityMemory.fname(characterTable.address+24,characterTable.name);
+        characterConfig.values["resource_character_max_objects"]="3";
+        ebon::resources::Dumper tableDumper(priorityMemory,priorityReflection,characterConfig,output/"player-table-priorities");
+        require(tableDumper.run(),"character table priority capture failed");
+        const auto tableManifest=contents(output/"player-table-priorities"/"resource_manifest.jsonl");
+        require(tableManifest.find(characterTable.path)!=std::string::npos&&tableManifest.find(hero.path)!=std::string::npos&&
+                tableManifest.find(noise.path)!=std::string::npos,
+                "character table and player roots did not share reserved priority slots");
+        characterTable=characterTableBefore;priorityMemory.fname(characterTable.address+24,characterTable.name);
+        // Restore the original fixture for the general-stage regressions.
+        for(auto& type:priorityReflection.types)if(type.address==hero.klass)type.super.clear();
+        priorityReflection.types.pop_back();
         ebon::resources::Dumper failing(priorityMemory,priorityReflection,limited,output/"deferred-failure");
         require(!failing.run(false,[](){throw std::runtime_error("synthetic network failure");}),"deferred failure was hidden");
         require(contents(output/"deferred-failure"/"resource_manifest.jsonl").find(tuningPath)!=std::string::npos&&
@@ -608,8 +866,50 @@ int run(const std::filesystem::path& output) {
         const auto mapRows=contents(folder/"feature_exports"/"feature_table_rows.jsonl");
         require(mapRows.find("\"map_block_id\":\"FogBlock_001\"")!=mapRows.npos,
                 "mini-map fog row was missing from the feature table export");
-        require(contents(folder/"feature_exports"/"priority_capture.json").find("\"maps\":{\"candidates\":1")!=std::string::npos,
-                "mini-map DataAsset was not included in priority capture");
+        require(mapRows.find("\"table\":\"/Game/DataTable/MiniMap/DT_MiniMapFogRecord.DT_MiniMapFogRecord\"")!=mapRows.npos&&
+                mapRows.find("\"row\":\"FogRecord_001\",\"values\":{\"FogID\":77}")!=mapRows.npos,
+                "unreferenced MiniMapFogRecord table path or row values were not exported");
+        require(contents(folder/"resource_manifest.jsonl").find("/Game/DataTable/MiniMap/DT_MiniMapFogRecord.DT_MiniMapFogRecord")!=std::string::npos,
+                "direct MiniMap table root was not added to the resource manifest");
+        require(contents(folder/"feature_exports"/"priority_capture.json").find("\"maps\":{\"candidates\":2")!=std::string::npos,
+                "direct MiniMap table and DataAsset were not included in priority capture");
+    }
+    {
+        Fixture mapBudgetMemory;
+        ebon::Reflection mapBudgetReflection(mapBudgetMemory,config,{Fixture::module,0x1000,L"fixture",L"fixture"});
+        require(mapBudgetReflection.collect(),"map budget fixture seed failed");
+        mapBudgetMemory.featureResources(mapBudgetReflection);
+        const auto menuTypes=mapBudgetReflection.types;const auto menuObjects=mapBudgetReflection.objects;
+        mapBudgetMemory.miniMapResources(mapBudgetReflection);
+        mapBudgetReflection.types.insert(mapBudgetReflection.types.end(),menuTypes.begin(),menuTypes.end());
+        mapBudgetReflection.objects.insert(mapBudgetReflection.objects.end(),menuObjects.begin(),menuObjects.end());
+        auto assetType=std::find_if(mapBudgetReflection.types.begin(),mapBudgetReflection.types.end(),[](const ebon::Type& type){
+            return type.path=="/Script/HTGame.SystematicGameFeaturesDataAsset";
+        });
+        require(assetType!=mapBudgetReflection.types.end(),"menu budget fixture lost the feature asset schema");
+        assetType->size=216;assetType->fields.push_back(mapBudgetMemory.property("OversizeText","StrProperty",200,16));
+        for(unsigned i=0;i<8;++i){
+            const auto address=0xa5000ull+std::uint64_t(i)*0x200;
+            const auto name="DA_SystematicGameFeatures_"+std::to_string(i);
+            const auto path="/Game/UI/"+name+"."+name;
+            ebon::Object object{600+static_cast<int>(i),address,assetType->address,name,"SystematicGameFeaturesDataAsset",path};
+            mapBudgetReflection.objects.push_back(object);mapBudgetMemory.object(address,assetType->address,object.index,name);
+            mapBudgetMemory.fstring(address+200,std::wstring(60000,L'界'));
+        }
+        auto limited=config;limited.values["resource_feature_only"]="1";limited.values["resource_max_output_mb"]="1";
+        const auto folder=output/"minimap-byte-budget";
+        auto control=limited;control.values["resource_max_output_mb"]="32";
+        ebon::resources::Dumper controlDumper(mapBudgetMemory,mapBudgetReflection,control,output/"minimap-byte-budget-control");
+        require(controlDumper.run(),"unbounded map budget control capture failed");
+        require(contents(output/"minimap-byte-budget-control"/"resource_manifest.jsonl").find("/Game/DataTable/MiniMap/DT_MiniMapFogRecord.DT_MiniMapFogRecord")!=std::string::npos,
+                "map budget fixture did not discover its direct table root");
+        ebon::resources::Dumper dumper(mapBudgetMemory,mapBudgetReflection,limited,folder);
+        require(!dumper.run(),"oversized menu fixture unexpectedly fit its byte budget");
+        require(contents(folder/"resource_manifest.jsonl").find("/Game/DataTable/MiniMap/DT_MiniMapFogRecord.DT_MiniMapFogRecord")!=std::string::npos&&
+                contents(folder/"data"/"DataTable"/"MiniMap"/"DT_MiniMapFogRecord.jsonl").find("FogRecord_001")!=std::string::npos,
+                "menu byte-budget exhaustion prevented the earlier MiniMap table export");
+        require(contents(folder/"resource_state.json").find("byte budget exceeded")!=std::string::npos,
+                "MiniMap priority budget regression did not exercise byte exhaustion");
     }
     {
         Fixture longMemory;
@@ -621,7 +921,65 @@ int run(const std::filesystem::path& output) {
         require(dumper.run(),"long widget Outer path prevented capture");
         require(contents(output/"long-path"/"resource_manifest.jsonl").find("data/_long/object_")!=std::string::npos,"long path did not use a short filename");
     }
-    std::cout<<"Resource self-test passed: table values and map block IDs, sparse holes, corrupt bitmaps, transient assets, scene coordinates, defaults, Lua asset values, references, categories, text candidates and budgets\n";
+    {
+        Fixture rpcMemory;constexpr std::uint64_t params=0x1a0000,wrappers=0x1a1000,payload=0x1a2000;
+        rpcMemory.put(params,std::int32_t(301));
+        rpcMemory.put(params+8,ebon::rpc_samples::ArrayHeader{wrappers,1,1});
+        rpcMemory.put(params+24,std::int32_t(0));
+        rpcMemory.put(wrappers,std::uint8_t(14));rpcMemory.put(wrappers+4,std::uint32_t(77));rpcMemory.put(wrappers+8,std::uint32_t(2));
+        rpcMemory.put(wrappers+16,ebon::rpc_samples::ArrayHeader{payload,3,3});
+        const std::uint8_t raw[]={0xaa,0xbb,0xcc};rpcMemory.putBytes(payload,raw,sizeof(raw));
+        const ebon::rpc_samples::RpcLayout schema{32,0,8,0,16,32,0,0,4,16};
+        const std::map<std::int64_t,std::string> kinds={{14,"String"}};std::string sample;
+        ebon::Property wrapperArray;wrapperArray.type="ArrayProperty";wrapperArray.element=16;
+        wrapperArray.detail="{\"inner\":{\"type\":\"StructProperty\",\"size\":32,\"target\":\"/Script/HottaFramework.ParameterWrapper\"}}";
+        require(ebon::rpc_samples::wrapperArrayLayoutMatches(&wrapperArray,32),
+                "TArray wrapper element layout was rejected despite a verified inner struct size");
+        require(!ebon::rpc_samples::wrapperArrayLayoutMatches(&wrapperArray,24),
+                "mismatched TArray wrapper element size was accepted");
+        require(ebon::rpc_samples::captureClientGameDataRpc(rpcMemory,params,schema,301,8,kinds,0x123456,0x654321,42,1234,sample),
+                "valid ClientGameDataRPC call sample was rejected");
+        require(sample.find("\"message_id\":301")!=sample.npos&&sample.find("\"type_name\":\"String\"")!=sample.npos&&
+                sample.find("\"captured_payload_hex\":\"aabbcc\"")!=sample.npos&&sample.find("\"sample_id\":42")!=sample.npos&&
+                sample.find("\"tick_ms\":1234")!=sample.npos&&sample.find("\"params_truncated\":false")!=sample.npos&&
+                sample.find("\"wire_packet_bytes_captured\":false")!=sample.npos,
+                "RPC sample lost its message ID, reflected wrapper type, payload, or wire limitation");
+        require(!ebon::rpc_samples::captureClientGameDataRpc(rpcMemory,params,schema,300,8,kinds,0,0,43,1235,sample),
+                "explicit message ID filter accepted an unrelated sample");
+        require(ebon::rpc_samples::captureClientGameDataRpc(rpcMemory,params,schema,-1,2,kinds,0,0,44,1236,sample)&&
+                sample.find("\"captured_payload_hex\":\"aabb\"")!=sample.npos&&sample.find("\"truncated\":true")!=sample.npos,
+                "all-ID sampling did not mark a bounded payload as truncated");
+        auto invalid=schema;invalid.parameters=30;
+        require(!ebon::rpc_samples::captureClientGameDataRpc(rpcMemory,params,invalid,-1,8,kinds,0,0,47,1239,sample),
+                "out-of-bounds ClientGameDataRPC parameter layout was accepted");
+    }
+    {
+        Fixture fogMemory;constexpr std::uint64_t params=0x1b0000;
+        fogMemory.fstring(params,L"FogRecord_001");fogMemory.put(params+16,std::int32_t(2));fogMemory.put(params+20,std::int32_t(7));
+        const std::uint8_t oldRow[]={0x10,0x20,0x30,0x40,0x50,0x60,0x70,0x80};fogMemory.putBytes(params+24,oldRow,sizeof(oldRow));
+        const ebon::rpc_samples::FogLayout schema{32,0,16,20,24,8};std::string sample;
+        require(ebon::rpc_samples::captureFogRecord(fogMemory,params,schema,0x123456,0x654321,45,1237,sample),
+                "valid MiniMap fog-record callback sample was rejected");
+        require(sample.find("\"record_name\":\"FogRecord_001\"")!=sample.npos&&sample.find("\"change_type\":2")!=sample.npos&&
+                sample.find("\"row_index\":7")!=sample.npos&&sample.find("\"old_row_hex\":\"1020304050607080\"")!=sample.npos&&
+                sample.find("\"sample_id\":45")!=sample.npos&&sample.find("\"wire_packet_bytes_captured\":false")!=sample.npos,
+                "fog callback sample lost its record name, change metadata, old-row bytes, or capture limitation");
+        auto invalid=schema;invalid.oldRowSize=16;
+        require(!ebon::rpc_samples::captureFogRecord(fogMemory,params,invalid,0,0,46,1238,sample),
+                "out-of-bounds fog row layout was accepted");
+    }
+    testRpcSamplerBinding(output);
+    {
+        Fixture names;constexpr std::uint64_t at=0x1c0000;
+        names.fname(at,"MiniMapFogRecord");ebon::rpc_samples::SyncName name;
+        require(names.get(at,name),"sync property-name fixture is unreadable");const ebon::Layout layout(config);
+        require(ebon::rpc_samples::syncResolveName(names,Fixture::pool,&layout,name)=="MiniMapFogRecord",
+                "replicated-property FName did not resolve through the verified name pool");
+        name.number=3;
+        require(ebon::rpc_samples::syncResolveName(names,Fixture::pool,&layout,name)=="MiniMapFogRecord_2",
+                "replicated-property FName instance number was lost");
+    }
+    std::cout<<"Resource self-test passed: resource values, budgets, RPC override installation, argument forwarding and sampling status\n";
     return 0;
 }
 } // namespace

@@ -101,6 +101,9 @@ class ResourceBundle:
                  captures: list[Path] | None = None, limits: BundleLimits | None = None):
         self.client, self.output = client.resolve(), output.resolve()
         self.key, self.decompressor = key, decompressor
+        if self.decompressor is None:
+            from .oodle import bundled_decoder
+            self.decompressor = bundled_decoder()
         self.patterns, self.all_files = patterns or [], all_files
         self.captures = [path.resolve() for path in captures or []]
         self.limits = limits or BundleLimits()

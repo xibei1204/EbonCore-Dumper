@@ -7,8 +7,10 @@ namespace ebon {
 struct Layout {
     std::int64_t poolBlocks=16,poolBlock=8,poolCursor=12,nameShift=6,nameWide=1,nameHeader=2,nameStride=2,nameBits=16;
     std::int64_t chunks=16,numElements=36,maxElements=32,numChunks=44,maxChunks=40,itemStride=24,itemObject=0,elementsPerChunk=65536;
+    std::int64_t itemFlags=8,itemSerial=16;
     std::int64_t objIndex=12,objClass=16,objName=24,objOuter=32,objFlags=8,nameNumber=4;
     std::int64_t structSuper=64,structSize=88,structFields=80,fieldClass=8,fieldNext=32,fieldName=40,fieldClassName=0;
+    std::int64_t structAlignment=92,structAlignmentWidth=2;
     std::int64_t propArray=56,propElement=60,propFlags=64,propOffset=76,propTarget=-1,boolMask=-1;
     std::int64_t functionFlags=176,functionParmsSize=182,functionNative=216,enumNames=64,enumStride=16;
     std::int64_t functionRpcId=-1,functionRpcResponseId=-1,propertyRepIndex=-1,propertyRepCondition=-1,propertyRepNotify=-1;
@@ -19,9 +21,11 @@ struct Layout {
         EBON_LAYOUT(nameShift,"name_entry_length_shift");EBON_LAYOUT(nameWide,"name_entry_wide_mask");EBON_LAYOUT(nameHeader,"name_entry_header_size");EBON_LAYOUT(nameStride,"name_entry_stride");EBON_LAYOUT(nameBits,"name_block_bits");
         EBON_LAYOUT(chunks,"object_array_chunks_offset");EBON_LAYOUT(numElements,"object_array_num_elements_offset");EBON_LAYOUT(maxElements,"object_array_max_elements_offset");EBON_LAYOUT(numChunks,"object_array_num_chunks_offset");EBON_LAYOUT(maxChunks,"object_array_max_chunks_offset");
         EBON_LAYOUT(itemStride,"object_item_stride");EBON_LAYOUT(itemObject,"object_item_object_offset");EBON_LAYOUT(elementsPerChunk,"object_array_elements_per_chunk");
+        EBON_LAYOUT(itemFlags,"object_item_flags_offset");EBON_LAYOUT(itemSerial,"object_item_serial_offset");
         EBON_LAYOUT(objIndex,"object_index_offset");EBON_LAYOUT(objClass,"object_class_offset");EBON_LAYOUT(objName,"object_name_offset");EBON_LAYOUT(objOuter,"object_outer_offset");EBON_LAYOUT(nameNumber,"fname_number_offset");
         EBON_LAYOUT(objFlags,"object_flags_offset");
         EBON_LAYOUT(structSuper,"struct_super_offset");EBON_LAYOUT(structSize,"struct_size_offset");EBON_LAYOUT(structFields,"struct_child_properties_offset");EBON_LAYOUT(fieldClass,"field_class_offset");EBON_LAYOUT(fieldNext,"field_next_offset");EBON_LAYOUT(fieldName,"field_name_offset");EBON_LAYOUT(fieldClassName,"field_class_name_offset");
+        EBON_LAYOUT(structAlignment,"struct_alignment_offset");EBON_LAYOUT(structAlignmentWidth,"struct_alignment_width");
         EBON_LAYOUT(propArray,"property_array_dim_offset");EBON_LAYOUT(propElement,"property_element_size_offset");EBON_LAYOUT(propFlags,"property_flags_offset");EBON_LAYOUT(propOffset,"property_offset_offset");EBON_LAYOUT(propTarget,"property_target_offset");EBON_LAYOUT(boolMask,"bool_field_mask_offset");
         EBON_LAYOUT(functionFlags,"function_flags_offset");EBON_LAYOUT(functionParmsSize,"function_params_size_offset");EBON_LAYOUT(functionNative,"function_native_offset");EBON_LAYOUT(enumNames,"enum_names_offset");EBON_LAYOUT(enumStride,"enum_item_stride");
         EBON_LAYOUT(functionRpcId,"function_rpc_id_offset");EBON_LAYOUT(functionRpcResponseId,"function_rpc_response_id_offset");
@@ -30,6 +34,8 @@ struct Layout {
 #undef EBON_LAYOUT
         const std::int64_t mandatory[]={poolBlocks,poolBlock,poolCursor,objIndex,objClass,objName,objOuter,chunks,numElements,maxElements,numChunks,maxChunks,itemObject,structSuper,structSize,structFields,fieldClass,fieldNext,fieldName,fieldClassName,propArray,propElement,propFlags,propOffset,enumNames};
         for(auto n:mandatory)if(n<0||n>4096)throw std::runtime_error("layout offset outside supported 0..4096");
+        if(structAlignment<0||structAlignment>4096||(structAlignmentWidth!=2&&structAlignmentWidth!=4))throw std::runtime_error("invalid struct alignment layout");
+        if(itemFlags<0||itemSerial<0||itemFlags+4>itemStride||itemSerial+4>itemStride||itemObject+8>itemStride)throw std::runtime_error("object item identity exceeds stride");
         for(auto n:{objFlags,functionRpcId,functionRpcResponseId,propertyRepIndex,propertyRepCondition,propertyRepNotify})
             if(n< -1||n>4096)throw std::runtime_error("network layout offset outside supported -1..4096");
         if(nameShift<0||nameShift>15||nameHeader<2||nameHeader>16||nameStride<1||nameStride>8||nameBits<12||nameBits>20||nameNumber<4||nameNumber>12||itemStride<8||itemStride>128||elementsPerChunk<256||elementsPerChunk>1048576||maxObjects<1||maxObjects>10000000||maxFields<1||maxFields>65536||maxNameLength<4||maxNameLength>4096||maxTypeSize<1||maxTypeSize>268435456||scanMb<1||scanMb>4096||enumStride<16||enumStride>64)throw std::runtime_error("layout bounds invalid");
@@ -39,6 +45,7 @@ struct Object {std::int32_t index=0;std::uint64_t address=0,klass=0;std::string 
 struct Property {
     std::string name,type,target,role;
     std::string detail="{}";
+    std::string headerEvidence;
     std::vector<NetworkRuntimeField> innerFields;
     std::uint64_t address=0,flags=0;
     std::int32_t offset=-1,element=-1,array=-1;
@@ -53,6 +60,7 @@ struct Type {
     std::optional<std::int32_t> size;
     std::optional<std::uint16_t> parameterSize;
     std::optional<std::uint32_t> alignment;
+    std::string headerEvidence;
     std::optional<std::uint64_t> flags,nativeRva;
     std::optional<std::uint16_t> rpcId,rpcResponseId;
     std::vector<Property> fields;
@@ -71,6 +79,8 @@ class Reflection {
 public:
     // Called between bounded batches, including while a single discovery pass runs.
     std::function<void(const char*,std::uint64_t,std::uint64_t)> onProgress;
+    // Optional observer setup after types/objects exist and before network scan.
+    std::function<void()> beforeNetworkCollect;
     std::string progressPhase="initializing";
     std::uint64_t progressDone=0,progressTotal=0;
     void report(const char* phase,std::uint64_t done,std::uint64_t total){progressPhase=phase;progressDone=done;progressTotal=total;if(onProgress)onProgress(phase,done,total);}
@@ -80,6 +90,7 @@ public:
     std::string moduleSha256;
     std::vector<std::uint64_t> poolCandidates,arrayCandidates;
     std::vector<std::string> invalidObjectSamples,fieldLayoutProbes;
+    std::vector<std::string> excludedTypes;
     std::vector<std::string> runtimeVtables;
     std::vector<std::string> classNetworkTables;
     std::vector<std::string> networkCacheCandidates;
@@ -303,6 +314,15 @@ public:
                 if(l_.propertyRepNotify>=0){auto notify=name(field,l_.propertyRepNotify);if(notify!="None"&&plausible(notify))p.repNotify=notify;}
             }
             p.detail=propertyDetail(field,p.type,p.element,p.target,p.boolMask,0,&p.innerFields,type.path+"."+p.name,type.path);
+            if(config_.number("sdk_live_capture",0)){
+                const auto extra=l_.propOffset+0x2c;
+                const auto extent=extra+((p.type=="ClassProperty"||p.type=="SoftClassProperty"||p.type=="EnumProperty"||p.type=="MapProperty")?16:8);
+                std::vector<std::uint8_t> raw((std::size_t)extent);
+                if(mem_.copy(field,raw.data(),raw.size())){
+                    std::ostringstream encoded;for(auto byte:raw)encoded<<std::hex<<std::setw(2)<<std::setfill('0')<<(unsigned)byte;
+                    p.headerEvidence=encoded.str();
+                }
+            }
             if(l_.propTarget>=0&&(p.type=="StructProperty"||p.type=="ObjectProperty"||p.type=="ClassProperty"||p.type=="EnumProperty")){std::uint64_t target=0;if(read(field,l_.propTarget,target)&&objectMap_.count(target))p.target=objectMap_.at(target).path;}
             if(p.type=="BoolProperty"){if(l_.boolMask>=0){std::uint8_t mask=0;if(read(field,l_.boolMask,mask)&&mask)p.boolMask=mask;}if(!p.boolMask)optionalUnresolved.push_back("BoolProperty mask unavailable: "+type.path+"."+p.name);}
             if((p.type=="StructProperty"||p.type=="ObjectProperty"||p.type=="ClassProperty"||p.type=="EnumProperty")&&p.target.empty())optionalUnresolved.push_back("property target layout unavailable: "+type.path+"."+p.name);
@@ -324,7 +344,7 @@ public:
             if(nested&&depth)nested->push_back({field,fieldPath,fieldOwner,fieldOffset,false,size,arrayDim});
         }
         const auto targetMatches=[&](const Object& o){
-            if(type=="StructProperty")return o.className=="ScriptStruct";
+            if(type=="StructProperty")return o.className=="ScriptStruct"||o.className=="UserDefinedStruct";
             if(type=="EnumProperty"||type=="ByteProperty")return o.className=="Enum"||o.className=="UserDefinedEnum";
             if(type.find("DelegateProperty")!=std::string::npos)return o.className.find("Function")!=std::string::npos;
             return o.className=="Class"||o.className.find("GeneratedClass")!=std::string::npos;
@@ -332,16 +352,19 @@ public:
         if(type=="StructProperty"||type=="EnumProperty"||type=="ByteProperty"||type.find("ObjectProperty")!=std::string::npos||
            type=="ClassProperty"||type=="SoftClassProperty"||type=="InterfaceProperty"||type.find("DelegateProperty")!=std::string::npos){
             std::map<std::string,std::int64_t> matches;
-            for(auto offset=extra;offset<=extra+0x20;offset+=8){
+            // Only read the property's own target slot. The old +0x20 scan
+            // included adjacent allocation bytes and produced ambiguous targets.
+            const auto offset=extra+((type=="ClassProperty"||type=="SoftClassProperty"||type=="EnumProperty")?8:0);
+            {
                 std::uint64_t address=0;
-                if(!read(field,offset,address))continue;
+                const bool readable=read(field,offset,address);
                 const auto found=objectMap_.find(address);
-                if(found==objectMap_.end()||!targetMatches(found->second))continue;
-                if(type=="StructProperty"){
+                bool accepted=readable&&found!=objectMap_.end()&&targetMatches(found->second);
+                if(accepted&&type=="StructProperty"){
                     std::int32_t reflected=0;
-                    if(!read(address,l_.structSize,reflected)||reflected!=size)continue;
+                    accepted=read(address,l_.structSize,reflected)&&reflected==size;
                 }
-                matches[found->second.path]=offset;
+                if(accepted)matches[found->second.path]=offset;
             }
             if((type=="ClassProperty"||type=="SoftClassProperty")&&matches.size()>1)
                 matches.erase("/Script/CoreUObject.Class");
@@ -385,6 +408,10 @@ public:
         checkDeadline();
         if(!arrayHeader(objects_,chunkTable_,count_)){errors.push_back("object array changed before collection");return false;}
         objects.clear();types.clear();objectMap_.clear();optionalUnresolved.clear();invalidObjectSamples.clear();fieldLayoutProbes.clear();
+        excludedTypes.clear();
+        const bool liveSdk=config_.number("sdk_live_capture",0)!=0;
+        std::size_t typeCandidates=0;
+        std::unordered_map<std::string,bool> typePaths;
         names_.clear();
         nullSlots=invalidObjects=propertyCount=rpcCount=replicatedPropertyCount=0;propertyLayoutVerified_=false;
         for(std::int32_t i=0;i<count_;++i){if((i&255)==0){checkDeadline();report("objects",i,count_);}auto address=objectAt(chunkTable_,i);if(!address){++nullSlots;continue;}Object o;o.address=address;o.index=i;std::int32_t actual=-1;
@@ -398,7 +425,9 @@ public:
         if(objects.size()<3){errors.push_back("fewer than three valid objects collected");return false;}
         inferPropertyLayout();
         runtimeVtables.clear();
-        for(const auto& object:objects)if(object.path=="/Script/CoreUObject.Default__Object"){
+        for(const auto& object:objects)if(object.path=="/Script/CoreUObject.Default__Object"||
+            object.path=="/Script/Engine.Default__Actor"||object.path=="/Script/HottaFramework.Default__HottaPlayerState"||
+            object.path=="/Script/HTGame.Default__HTPlayerState"){
             std::uint64_t vtable=0;
             if(mem_.get(object.address,vtable)){
                 std::string record="{\"object\":"+quote(object.path)+",\"entries\":[";
@@ -409,20 +438,114 @@ public:
         std::size_t processed=0;
         for(const auto& o:objects){if((processed&127)==0){checkDeadline();report("types",processed,objects.size());}++processed;Type t;t.address=o.address;t.name=o.name;t.path=o.path;
             if(o.className=="Class"||o.className=="BlueprintGeneratedClass"||(o.className.size()>14&&o.className.substr(o.className.size()-14)=="GeneratedClass"))t.kind="class";
-            else if(o.className=="ScriptStruct")t.kind="struct";else if(o.className=="Function"||o.className=="DelegateFunction"||o.className=="SparseDelegateFunction")t.kind="function";else if(o.className=="Enum"||o.className=="UserDefinedEnum")t.kind="enum";else continue;
+            else if(o.className=="ScriptStruct"||o.className=="UserDefinedStruct")t.kind="struct";else if(o.className=="Function"||o.className=="DelegateFunction"||o.className=="SparseDelegateFunction")t.kind="function";else if(o.className=="Enum"||o.className=="UserDefinedEnum")t.kind="enum";else continue;
+            ++typeCandidates;
+            if(liveSdk)typePaths.emplace(t.path,true);
+            if(liveSdk){
+                // Refresh each type and its fields together: the earlier object
+                // inventory may precede Blueprint unloading or replacement.
+                mem_.refresh();
+                std::int32_t index=-1;std::uint64_t klass=0;std::uint32_t flags=0;
+                if(objectAt(chunkTable_,o.index)!=o.address||!read(o.address,l_.objIndex,index)||index!=o.index||
+                   !read(o.address,l_.objClass,klass)||klass!=o.klass||name(o.address,l_.objName)!=o.name||
+                   !read(o.address,l_.objFlags,flags)||(flags&0x0001c000u)){
+                    excludedTypes.push_back(o.path+": object changed, destroyed or replaced since inventory");continue;
+                }
+            }
+            const auto errorStart=errors.size();
+            const auto propertyStart=propertyCount;
+            std::vector<std::uint8_t> header;
+            if(liveSdk){
+                header.resize((std::size_t)std::max({l_.objName+l_.nameNumber+4,l_.objClass+8,l_.objFlags+4,
+                    l_.objIndex+4,l_.structSuper+8,l_.structFields+8,l_.structSize+4,l_.structAlignment+l_.structAlignmentWidth}));
+                if(!mem_.copy(t.address,header.data(),header.size())){
+                    excludedTypes.push_back(t.path+": unreadable live type header");continue;
+                }
+            }
             if(t.kind!="enum"){std::int32_t size=0;std::uint64_t super=0;if(read(t.address,l_.structSize,size)&&size>=0&&size<=l_.maxTypeSize)t.size=size;else {t.complete=false;errors.push_back("invalid UStruct size: "+t.path);}
-                std::uint32_t alignment=0;if(read(t.address,l_.structSize+4,alignment)&&alignment&&alignment<=64&&(alignment&(alignment-1))==0)t.alignment=alignment;
+                std::uint32_t alignment=0;bool alignmentRead=false;
+                if(l_.structAlignmentWidth==2){std::uint16_t value=0;alignmentRead=read(t.address,l_.structAlignment,value);alignment=value;}
+                else alignmentRead=read(t.address,l_.structAlignment,alignment);
+                if(alignmentRead&&alignment&&alignment<=64&&(alignment&(alignment-1))==0&&t.size&&
+                   (t.kind=="class"||!*t.size||*t.size%alignment==0))t.alignment=alignment;
                 if(read(t.address,l_.structSuper,super)){if(super&&objectMap_.count(super))t.super=objectMap_.at(super).path;else if(super){t.complete=false;errors.push_back("super is absent from object inventory: "+t.path);}}else{t.complete=false;errors.push_back("unreadable SuperStruct: "+t.path);}
                 if(t.kind=="function"){std::uint32_t flags=0;std::uint16_t ps=0;std::uint64_t fn=0;if(read(t.address,l_.functionFlags,flags))t.flags=flags;if(read(t.address,l_.functionParmsSize,ps)&&(!t.size||ps<=*t.size))t.parameterSize=ps;else{t.complete=false;errors.push_back("unreadable function parameter size: "+t.path);}if(read(t.address,l_.functionNative,fn)&&fn>=module_.base&&fn<module_.base+module_.size&&mem_.executable(fn))t.nativeRva=fn-module_.base;
                     if(flags&0x40){++rpcCount;std::uint16_t id=0;if(l_.functionRpcId>=0&&read(t.address,l_.functionRpcId,id))t.rpcId=id;if(l_.functionRpcResponseId>=0&&read(t.address,l_.functionRpcResponseId,id))t.rpcResponseId=id;}
                 }
                 readFields(t);
+                if(liveSdk&&t.size)for(const auto& field:t.fields)
+                    if((std::int64_t)field.offset+(std::int64_t)field.array*field.element>*t.size){
+                        t.complete=false;errors.push_back("property exceeds its owner size: "+t.path+"."+field.name);break;
+                    }
             }else {std::uint64_t data=0;std::int32_t n=0,capacity=0;
                 if(!read(t.address,l_.enumNames,data)||!read(t.address,l_.enumNames+8,n)||!read(t.address,l_.enumNames+12,capacity)||n<0||n>65536||capacity<n||capacity>1000000||(n&&!ptr(data))){t.complete=false;errors.push_back("invalid enum array: "+t.path);}
                 else for(int i=0;i<n;++i){auto at=data+(std::uint64_t)i*l_.enumStride;auto en=name(at,0);std::int64_t v=0;if(!plausible(en)||!mem_.get(at+8,v)){t.complete=false;errors.push_back("invalid enum item: "+t.path);break;}t.enumValues.push_back({en,v});}}
+            if(liveSdk){
+                mem_.refresh();std::vector<std::uint8_t> after(header.size());
+                if(!mem_.copy(t.address,after.data(),after.size())||after!=header){
+                    t.complete=false;errors.push_back("type header changed while reading its fields: "+t.path);
+                }
+            }
+            if(liveSdk&&(!t.complete||errors.size()!=errorStart)){
+                std::string reason=t.path+": incomplete live metadata";
+                for(auto i=errorStart;i<errors.size();++i)reason+=" | "+errors[i];
+                excludedTypes.push_back(std::move(reason));errors.resize(errorStart);propertyCount=propertyStart;
+                continue;
+            }
+            if(t.kind=="class"||t.kind=="struct"){
+                const auto bytes=(std::size_t)std::max(l_.structSize+4,l_.structAlignment+l_.structAlignmentWidth);
+                std::vector<std::uint8_t> raw(bytes);
+                if(mem_.copy(t.address,raw.data(),raw.size())){
+                    std::ostringstream encoded;for(auto byte:raw)encoded<<std::hex<<std::setw(2)<<std::setfill('0')<<(unsigned)byte;
+                    t.headerEvidence=encoded.str();
+                }
+            }
             types.push_back(std::move(t));}
+        if(liveSdk){
+            // Remove descendants of excluded bases and methods of excluded owners.
+            std::unordered_map<std::string,std::size_t> byPath;
+            std::unordered_map<std::string,std::vector<std::size_t>> dependents;
+            for(std::size_t i=0;i<types.size();++i)byPath.emplace(types[i].path,i);
+            std::vector<bool> rejected(types.size(),false);
+            std::vector<std::size_t> queue;
+            for(std::size_t i=0;i<types.size();++i){
+                const auto& type=types[i];std::vector<std::string> dependencies;
+                if(!type.super.empty())dependencies.push_back(type.super);
+                if(type.kind=="function"){
+                    const auto dot=type.path.rfind('.');
+                    if(dot!=std::string::npos){
+                        const auto owner=type.path.substr(0,dot);
+                        if(typePaths.count(owner))dependencies.push_back(owner);
+                    }
+                }
+                for(const auto& dependency:dependencies){
+                    dependents[dependency].push_back(i);
+                    if(!byPath.count(dependency)&&!rejected[i]){rejected[i]=true;queue.push_back(i);}
+                }
+            }
+            for(std::size_t n=0;n<queue.size();++n)for(auto child:dependents[types[queue[n]].path])
+                if(!rejected[child]){rejected[child]=true;queue.push_back(child);}
+            std::vector<Type> validated;validated.reserve(types.size()-queue.size());
+            propertyCount=rpcCount=replicatedPropertyCount=0;
+            for(std::size_t i=0;i<types.size();++i){
+                if(rejected[i]){excludedTypes.push_back(types[i].path+": base type or function owner was not validated");continue;}
+                auto& type=types[i];propertyCount+=type.fields.size();
+                if(type.kind=="function"&&type.flags&&(*type.flags&0x40))++rpcCount;
+                for(const auto& field:type.fields)if(field.flags&0x20)++replicatedPropertyCount;
+                validated.push_back(std::move(type));
+            }
+            types=std::move(validated);
+            const auto maximum=config_.number("sdk_max_invalid_type_percent",5);
+            if(maximum<0||maximum>25)throw std::runtime_error("sdk_max_invalid_type_percent must be in 0..25");
+            if(typeCandidates&&excludedTypes.size()*100>typeCandidates*(std::uint64_t)maximum)
+                errors.push_back("too many live types failed validation; inspect excluded_types before changing the profile");
+            if(!excludedTypes.empty())optionalUnresolved.push_back(std::to_string(excludedTypes.size())+" live types and dependent layouts excluded; see excluded_types");
+            if(invalidObjects)optionalUnresolved.push_back(std::to_string(invalidObjects)+" changed object slots omitted from live SDK inventory");
+            mem_.refresh();
+        }
         if(types.empty()){errors.push_back("no reflected types found; class/layout validation is insufficient");return false;}
-        if(invalidObjects)unresolved.push_back(std::to_string(invalidObjects)+" non-null object slots failed validation (mutation or unknown layout)");
+        if(invalidObjects&&!liveSdk)unresolved.push_back(std::to_string(invalidObjects)+" non-null object slots failed validation (mutation or unknown layout)");
+        if(beforeNetworkCollect)beforeNetworkCollect();
         if(includeNetwork&&config_.number("collect_network",1)!=0){
             collectClassNetworkTables();
             collectRuntimeNetworkCaches();
@@ -745,6 +868,23 @@ public:
         }
         for(const auto& t:types){ts<<"{\"kind\":"<<quote(t.kind)<<",\"name\":"<<quote(t.name)<<",\"path\":"<<quote(t.path)<<",\"address\":"<<quote(hex(t.address))<<",\"size\":"<<(t.size?std::to_string(*t.size):"null")<<",\"alignment\":"<<(t.alignment?std::to_string(*t.alignment):"null")<<",\"parameter_size\":"<<(t.parameterSize?std::to_string(*t.parameterSize):"null")<<",\"super\":"<<(t.super.empty()?"null":quote(t.super))<<",\"flags\":"<<(t.flags?quote(hex(*t.flags)):"null")<<",\"rpc_id\":"<<(t.rpcId?std::to_string(*t.rpcId):"null")<<",\"rpc_response_id\":"<<(t.rpcResponseId?std::to_string(*t.rpcResponseId):"null")<<",\"native_rva\":"<<(t.nativeRva?quote(hex(*t.nativeRva)):"null")<<",\"complete\":"<<(t.complete?"true":"false")<<",\"fields\":[";for(std::size_t i=0;i<t.fields.size();++i){if(i)ts<<',';ts<<propertyJson(t.fields[i]);}ts<<"],\"enum_values\":[";for(std::size_t i=0;i<t.enumValues.size();++i){if(i)ts<<',';ts<<"{\"name\":"<<quote(t.enumValues[i].first)<<",\"value\":"<<t.enumValues[i].second<<'}';}ts<<"]}\n";}
         save(out/"objects.jsonl",os.str());save(out/"types.jsonl",ts.str());
+        std::ostringstream evidence;
+        evidence<<"{\"format\":\"EbonReflectionEvidence-v1\",\"module_sha256\":"<<quote(moduleSha256)
+                <<",\"size_offset\":"<<l_.structSize<<",\"alignment_offset\":"<<l_.structAlignment
+                <<",\"alignment_width\":"<<l_.structAlignmentWidth<<",\"types\":[";
+        bool firstEvidence=true;
+        for(const auto& type:types)if(!type.headerEvidence.empty()){
+            if(!firstEvidence)evidence<<',';firstEvidence=false;
+            evidence<<"{\"path\":"<<quote(type.path)<<",\"address\":"<<quote(hex(type.address))
+                    <<",\"bytes\":"<<quote(type.headerEvidence)<<"}";
+        }
+        evidence<<"],\"properties\":[";bool firstProperty=true;
+        for(const auto& type:types)for(const auto& field:type.fields)if(!field.headerEvidence.empty()){
+            if(!firstProperty)evidence<<',';firstProperty=false;
+            evidence<<"{\"owner\":"<<quote(type.path)<<",\"name\":"<<quote(field.name)
+                    <<",\"address\":"<<quote(hex(field.address))<<",\"bytes\":"<<quote(field.headerEvidence)<<"}";
+        }
+        save(out/"reflection_evidence.json",evidence.str()+"]}\n");
         writeNetwork(out);
         writeState(out,ok);
     }
@@ -767,7 +907,20 @@ public:
         std::vector<std::string> pools,arrays;for(auto p:poolCandidates)pools.push_back(hex(p-module_.base));for(auto p:arrayCandidates)arrays.push_back(hex(p-module_.base));
         std::ostringstream state;state<<"{\n  \"format\":\"EbonReflection-v1\",\n  \"status\":"<<quote(!status.empty()?status:(!ok?"failed":(optionalUnresolved.empty()?"complete":"complete_with_unresolved")))<<",\n  \"success\":"<<(ok?"true":"false")<<",\n  \"layout_verified\":"<<(layoutVerified_?"true":"false")<<",\n  \"property_layout_verified\":"<<(propertyLayoutVerified_?"true":"false")<<",\n  \"build\":{\"module\":"<<quote(utf8(module_.name))<<",\"sha256\":"<<(moduleSha256.empty()?"null":quote(moduleSha256))<<"},\n  \"module_base\":"<<quote(hex(module_.base))<<",\n  \"name_pool_rva\":"<<(pool_?quote(hex(pool_-module_.base)):"null")<<",\n  \"object_array_rva\":"<<(objects_?quote(hex(objects_-module_.base)):"null")<<",\n  \"objects\":"<<objects.size()<<",\n  \"types\":"<<types.size()<<",\n  \"properties\":"<<propertyCount<<",\n  \"null_slots\":"<<nullSlots<<",\n  \"invalid_objects\":"<<invalidObjects<<",\n  \"errors\":"<<array(errors)<<",\n  \"unresolved\":"<<array(unresolved)<<",\n  \"optional_unresolved\":"<<array(optionalUnresolved)<<",\n  \"name_pool_candidates\":"<<array(pools)<<",\n  \"object_array_candidates\":"<<array(arrays)<<",\n  \"coverage\":\"loaded reflected objects only; asset and protocol coverage not established\"\n}\n";
         auto stateText=state.str();
+        stateText.insert(stateText.find('\n')+1,"  \"sdk_validated_subset\": "+std::string(config_.number("sdk_live_capture",0)?"true":"false")+
+            ",\n  \"excluded_types\": "+array(excludedTypes)+",\n");
+        if(config_.number("sdk_live_capture",0))stateText.insert(stateText.find('\n')+1,
+            "  \"capture_timeout_seconds\": "+std::to_string(config_.number("sdk_timeout_seconds",600))+",\n");
         std::ostringstream offsets;
+        offsets<<"  \"runtime_layout\": {\"ARRAY_COUNT\":"<<l_.numElements<<",\"ARRAY_CHUNKS\":"<<l_.chunks
+               <<",\"ARRAY_NUM_CHUNKS\":"<<l_.numChunks<<",\"ELEMENTS_PER_CHUNK\":"<<l_.elementsPerChunk
+               <<",\"ITEM_STRIDE\":"<<l_.itemStride<<",\"ITEM_OBJECT\":"<<l_.itemObject<<",\"ITEM_FLAGS\":"<<l_.itemFlags
+               <<",\"ITEM_SERIAL\":"<<l_.itemSerial<<",\"INVALID_INTERNAL_FLAGS\":270532608"
+               <<",\"OBJECT_INDEX\":"<<l_.objIndex<<",\"OBJECT_FLAGS\":"<<l_.objFlags<<",\"OBJECT_CLASS\":"<<l_.objClass
+               <<",\"OBJECT_NAME\":"<<l_.objName<<",\"OBJECT_OUTER\":"<<l_.objOuter
+               <<",\"NAME_BITS\":"<<l_.nameBits<<",\"NAME_STRIDE\":"<<l_.nameStride<<",\"NAME_SHIFT\":"<<l_.nameShift
+               <<",\"NAME_WIDE\":"<<l_.nameWide<<",\"NAME_HEADER\":"<<l_.nameHeader<<",\"POOL_BLOCK\":"<<l_.poolBlock
+               <<",\"POOL_CURSOR\":"<<l_.poolCursor<<",\"POOL_BLOCKS\":"<<l_.poolBlocks<<"},\n";
         offsets<<"  \"runtime_vtables\": [";
         for(std::size_t i=0;i<runtimeVtables.size();++i){if(i)offsets<<',';offsets<<runtimeVtables[i];}
         offsets<<"],\n";

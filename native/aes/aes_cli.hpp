@@ -12,8 +12,8 @@ inline int aesMain(int argc,wchar_t** argv,bool memoryMode) {
             const auto value=[&](){if(i+1>=argc)throw std::runtime_error("missing option value");return std::wstring(argv[++i]);};
             if(arg==L"--help"||arg==L"-h") {
                 std::cout<<(memoryMode?"EbonAesScan --pid PID":"EbonAesFinder --file FILE [--file FILE ...]")
-                         <<" --pak <Pak file or directory> --out <new directory> [--seconds 120] [--retry-ms 2000] [--aligned-only]\n"
-                         <<"Read-only AES-256 candidate search. Only full Pak index SHA-1 matches are accepted.\n";
+                         <<" --pak <Pak/UTOC file or directory> --out <new directory> [--seconds 120] [--retry-ms 2000] [--aligned-only]\n"
+                         <<"Read-only AES-256 search. Verifies Pak index SHA-1 or the complete IoStore directory graph.\n";
                 return 0;
             }
             if(arg==L"--pak")options.pakPath=value();

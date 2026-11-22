@@ -27,5 +27,47 @@
       "instruction": "mov r14, r8"
     }
   ],
-  "live_function_call_verified": false
+  "live_function_call_verified": false,
+  "runtime_layout": {
+    "ITEM_STRIDE": 24,
+    "ITEM_OBJECT": 0,
+    "ITEM_FLAGS": 8,
+    "ITEM_SERIAL": 16,
+    "ELEMENTS_PER_CHUNK": 65536,
+    "INVALID_INTERNAL_FLAGS": 270532608
+  },
+  "layout_static_evidence": [
+    {
+      "rva": "0x18f259f",
+      "instruction": "shr rcx, 0x10",
+      "meaning": "65536 objects per chunk"
+    },
+    {
+      "rva": "0x18f25a3",
+      "instruction": "lea rdx, [rax + rax*2]",
+      "next_rva": "0x18f25b2",
+      "next_instruction": "lea rax, [rcx + rdx*8]",
+      "meaning": "24-byte object item stride"
+    },
+    {
+      "rva": "0x18f25bb",
+      "instruction": "cmp dword ptr [rax + 0x10], r8d",
+      "meaning": "object item serial at +16"
+    },
+    {
+      "rva": "0x191abd2",
+      "instruction": "test eax, 0x10200000",
+      "meaning": "weak resolution rejects unreachable/garbage item flags"
+    },
+    {
+      "rva": "0x18d5add",
+      "instruction": "movsxd rsi, dword ptr [r9 + 0x58]",
+      "meaning": "UStruct field span size at +88"
+    },
+    {
+      "rva": "0x18d5af6",
+      "instruction": "movsx rax, word ptr [r9 + 0x5c]",
+      "meaning": "16-bit MinAlignment at +92"
+    }
+  ]
 }

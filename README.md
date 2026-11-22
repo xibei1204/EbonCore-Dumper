@@ -1,6 +1,6 @@
 # EbonCore-Dumper
 
-Windows x64 / Unreal Engine 5 的只读反射采集、C++ SDK 生成与资源导出工具链。
+Windows x64 / Unreal Engine 5 的反射采集、C++ SDK 生成与资源导出工具链。默认读取已加载对象，另提供用户主动选择的角色定向加载模式。
 
 > 当前版本绑定的样本为《异环》`HTGame.exe`。客户端更新后必须重新验证模块 SHA-256 与布局，不能直接复用旧偏移。本仓库不附带游戏文件、运行 dump、实际密钥或第三方解压 DLL。
 
@@ -14,6 +14,8 @@ Windows x64 / Unreal Engine 5 的只读反射采集、C++ SDK 生成与资源导
 - network_metadata.json 的 systematic_game_features_component 只接受运行时交叉验证的 FClassNetCache，记录目标函数的真实 FieldNetIndex、父类缓存、字段数量和索引边界；未采到时保持 not_observed，不会用 -1 或 RPCId 猜值。
 - F10 生成战斗资产及蓝图依赖清单；export-battle-assets 按装载路径保全对应原始包文件，保留缺包和 IoStore 重建边界。详见 [菜单与战斗资源采集](docs/GAMEPLAY_CAPTURE.md)。
 - F10 优先保存配置正文，再独立采集网络布局；角色配置、依赖与菜单分别分配名额。`audit-gameplay` 比较同版本多次采集，检查正文缺项并重新验证复制布局字节，详见 [采集优化](docs/GAMEPLAY_OPTIMIZATION.md)。
+- 已加载玩家角色使用独立名额，全部角色根对象先于网格/动画依赖保存。`audit-character --character <角色ID或蓝图名>` 分别核对目标角色的技能配置与完整复制布局，见 [角色缺项检查](docs/CHARACTER_CAPTURE_2026-11-21.md)。
+- `run_character_capture.bat` 提供可选的角色定向加载与自动导出/审计，默认 Elyms；进入本地场景后按一次 Enter，使用版本绑定的反射加载入口。详见 [角色加载模式](docs/CHARACTER_LOADER.md)。
 - `resources.jsonl` **只作索引**；正文保存在各分类 `data/*.jsonl` 独立文件中。
 - 保全 loose / Pak / IoStore 资源，保留来源路径、状态与 SHA-256。
 - 搜索 AES Pak 索引密钥，只接受完整索引 SHA-1 验证通过的候选；在本次采集的 Dumper 终端窗口内按 F9 触发（也可写 `aes_hunt.request`）。
@@ -50,6 +52,10 @@ python -m unittest discover -s tests -p 'test_*.py' -v
 python tools/ebon_cli.py generate-sdk `
   --dump 'out/reflection/your_capture' --out 'out/sdk/your_sdk'
 ```
+
+默认注入后等待在本次 Dumper 终端内按 **F5** 才开始 Dump SDK。第一次快照保存在采集根目录，后续 F5 保存在 `sdk_snapshot_1`、`sdk_snapshot_2` 等独立目录；采集中重复按键会被忽略。`sdk_hotkey=0` 可恢复自动采集，专用 gameplay/friend/character profile 保持自动初始化。后续快照可用上面的 `generate-sdk` 命令生成 C++ SDK。
+F5 成功后自动生成的 C++ SDK 正文固定保存在 `out/sdk/CppSDK`，由独立生成器处理，旧版保留为同级 `CppSDK.previous_*`。采集失败可再次按 F5 重试；运行中变化的蓝图按类型复核，剔除清单保存在 `excluded_types`。
+Windows 占用固定目录时，完整新版保存在同级 `CppSDK.ready_*`，以 `sdk_body_state.json` 的 `sdk_output` 为实际路径。Runtime 身份句柄、GC 保护、多场景合并、对齐证据与参数名称迁移见 [生命周期与覆盖修复](docs/SDK_LIFECYCLE_REPAIR_2026-11-22.md)。
 
 只有成功且通过布局校验的快照可用于生成 SDK。注入器的加载成功提示不能代替 `dump_state.json` 的采集状态。
 
@@ -99,7 +105,7 @@ profiles/        # 已确认样本版本的布局与入口配置，不含实际�
 tests/           # Python 单元测试与 Windows 隔离宿主集成测试
 docs/            # 详细用法、实现边界及历史验证记录
 .github/         # Windows 构建与测试工作流
-build_native.bat # 一次构建全部 10 个原生目标
+build_native.bat # 一次构建全部 13 个原生目标（含本地 Oodle 解码器）
 ```
 
 `build/`、`out/`、`.work/`、个人指令文件和一次性探针只保留本地；密钥、凭据、客户端资产、dump 与日志均从版本控制排除。

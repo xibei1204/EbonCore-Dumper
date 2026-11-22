@@ -1,0 +1,76 @@
+{
+  "format": "EbonFriendRpcSpec-v1",
+  "module_sha256": "64ed3cae0b5fc61f3b56cdd933b4807cb23f0ec7913590db60d1a8642de2dfec",
+  "decoded_image_sha256": "94e38635dcc1168ea3d01ba4c85fdbfc99db3cb4abadc332f8d18b7f597aa3ef",
+  "packet_mapping_verified": false,
+  "evidence": {
+    "indices": "out/reports/friend_rpc_evidence_20261121.json",
+    "serialization": "out/reports/friend_rpc_image_verified_20261121.json",
+    "layout": "out/reflection/network_layouts_20261115_004927/types.jsonl"
+  },
+  "rpcs": [
+    {
+      "path": "/Script/HTGame.HTPlayerState.Client_Friend_RPC",
+      "direction": "server_to_client",
+      "reliable": true,
+      "field_net_index": 162,
+      "checksum": 851762034,
+      "field_net_index_evidence": "runtime_memory_revalidated",
+      "packet_bit_range": null,
+      "friend_message_types": null
+    },
+    {
+      "path": "/Script/HTGame.HTPlayerState.Server_Friend_RPC",
+      "direction": "client_to_server",
+      "reliable": true,
+      "field_net_index": 494,
+      "checksum": 1642528835,
+      "field_net_index_evidence": "runtime_memory_revalidated",
+      "packet_bit_range": null,
+      "friend_message_types": null
+    }
+  ],
+  "transport": {"observed": false, "protocol": null},
+  "outer_frame": {"verified": false, "schema": null},
+  "crypto": {"verified": false, "algorithm": null},
+  "normal_rpc_parameters": {
+    "evidence_kind": "static_code",
+    "session_path_verified": false,
+    "entry_requirement": "Identified ordinary, non-replay FRepLayout RPC parameter stream; not a raw UDP/TCP packet",
+    "fields": [
+      {"name": "InMessage_present", "bits": 1},
+      {"name": "ParameterWrappers_count", "when": "InMessage_present", "bits": 16, "signed": false},
+      {"name": "ParameterWrappers", "when": "InMessage_present", "count": "ParameterWrappers_count", "type": "ParameterWrapper_net"},
+      {"name": "ReadParameterIndex", "when": "InMessage_present", "bits": 32, "signed": true},
+      {"name": "Type", "when": "InMessage_present", "bits": 32, "signed": true}
+    ],
+    "absent_value": {"ParameterWrappers": [], "ReadParameterIndex": 0, "Type": 0},
+    "scalar_byte_order": "Archive-dependent; byte-swap branch exists, session setting not verified",
+    "member_presence_bits": false,
+    "native_base_helper_is_complete_rpc_format": false
+  },
+  "ParameterWrapper_net": {
+    "type_tag_bits": 8,
+    "custom_name_tags": [36, 37, 38],
+    "custom_name_encoding": "Archive virtual FName serializer; not raw memory name index/number",
+    "package_map_tags": [35, 37],
+    "package_map_condition": "PackageMap is non-null and archive network flag is set",
+    "ordinary_payload": {"length_bits": 32, "length_signed": true, "max_network_bytes": 16777216, "body": "opaque bytes"},
+    "text_tag": 16,
+    "text_caveat": "Network read can clear the local BinaryData; parameter memory need not retain original text bytes"
+  },
+  "base_archive_helper": {
+    "rva": "0x6bdc7c0",
+    "count_bits": 32,
+    "max_count": 1024,
+    "serializes_ReadParameterIndex": false,
+    "applies_as_complete_friend_rpc": false
+  },
+  "unresolved": [
+    "Same-operation raw packets aligned to sampled Friend RPC parameters",
+    "Actual session ordinary/replay/compatibility path and scalar byte order",
+    "ActorChannel/Bunch framing, function index bit encoding and transport transforms",
+    "Friend Type values, parameter order per Type, and payload semantic schema",
+    "Custom FName and PackageMap session-dependent encoding"
+  ]
+}

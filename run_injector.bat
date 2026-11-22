@@ -1,8 +1,12 @@
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0"
+rem Rebuild missing or stale capture tools, including header-only AES changes.
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\ensure_native_build.ps1 -OutputDirectory build-aes
+if errorlevel 1 exit /b 1
 echo EbonCore AES capture: start the game from its launcher when prompted.
 echo After injection, press F9 inside the EbonCore Dumper terminal to hunt the AES key.
+echo F5 in the same terminal triggers Dump SDK separately.
 python tools\ebon_cli.py inject-and-dump --injector build-aes\EbonDebugInject.exe --dumper build-aes\EbonDumper.dll --wait-aes --no-sdk %*
 set "EBON_CAPTURE_EXIT=%ERRORLEVEL%"
 echo Capture exit code: %EBON_CAPTURE_EXIT%. See this capture's aes\aes_state.json (or aes_N for repeat presses).

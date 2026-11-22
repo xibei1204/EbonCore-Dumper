@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import struct
 
 from tests.test_cpp_sdk import cpp_fixture
 from tools.ebon.cpp_sdk import generate_cpp_sdk
@@ -101,6 +102,56 @@ class NetworkCodegenTests(unittest.TestCase):
             data=json.loads((output/'network_metadata.json').read_text())
             self.assertEqual(data['rpcs'],[])
             self.assertEqual(manifest['network']['excluded_unstable_records'],1)
+
+
+    def test_multi_scene_indices_are_replayed_and_conflicts_remain_unavailable(self):
+        from tests.test_runtime_mapping import runtime_fixture
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);primary=runtime_fixture(root)
+            other_root=root/'other';other_root.mkdir();other=runtime_fixture(other_root)
+            for source in (primary,other):
+                rows=[json.loads(line) for line in (source/'types.jsonl').read_text().splitlines()]
+                fn=next(t for t in rows if t['name']=='GetPosition');fn['flags']='0x2000c0'
+                (source/'types.jsonl').write_text(''.join(json.dumps(t)+'\n' for t in rows))
+                metadata=json.loads((source/'network_metadata.json').read_text())
+                metadata['rpcs'].append(dict(path=fn['path'],rpc_id=None,rpc_response_id=None))
+                (source/'network_metadata.json').write_text(json.dumps(metadata))
+            mapping=json.loads((other/'runtime_mapping.json').read_text())
+            memory=bytearray((other/'network_memory.bin').read_bytes())
+            struct.pack_into('<ii',memory,0x1028,2,2)
+            struct.pack_into('<QII',memory,0x2000,int(fn['address'],0),0,456)
+            adjust=next(t for t in rows if t['name']=='Adjust')
+            struct.pack_into('<QII',memory,0x2018,int(adjust['address'],0),1,123)
+            cache=mapping['class_net_caches'][0]
+            cache['header_bytes']=memory[0x1000:0x1030].hex()
+            cache['entries']=[dict(path=fn['path'],field_net_index=0,checksum=456,record_bytes=memory[0x2000:0x2018].hex()),
+                              dict(path=adjust['path'],field_net_index=1,checksum=123,record_bytes=memory[0x2018:0x2030].hex())]
+            (other/'network_memory.bin').write_bytes(memory);(other/'runtime_mapping.json').write_text(json.dumps(mapping))
+            sdk=root/'sdk';manifest=generate_cpp_sdk(primary,sdk,extra_network_captures=[other])
+            data=json.loads((sdk/'network_metadata.json').read_text())
+            rpcs={r['path']:r for r in data['rpcs']}
+            self.assertIsNone(rpcs[adjust['path']]['field_net_index'])
+            self.assertEqual(rpcs[fn['path']]['field_net_index'],0)
+            self.assertEqual(manifest['network']['field_index_conflicts'],1)
+            self.assertFalse(manifest['network']['packet_mapping_verified'])
+            memory[0x2018]^=1;(other/'network_memory.bin').write_bytes(memory)
+            with self.assertRaisesRegex(CodegenError,'bytes differ'):generate_cpp_sdk(primary,root/'bad',extra_network_captures=[other])
+
+    def test_failed_scene_rejects_bad_table_but_replays_valid_cache(self):
+        from tests.test_runtime_mapping import runtime_fixture
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);primary=runtime_fixture(root)
+            other_root=root/'other';other_root.mkdir();other=runtime_fixture(other_root)
+            state=json.loads((other/'dump_state.json').read_text());state.update(success=False,status='failed',errors=['unstable blueprint'])
+            (other/'dump_state.json').write_text(json.dumps(state))
+            data=json.loads((other/'network_metadata.json').read_text())
+            data['class_tables']=[{'kind':'class_net_fields','class':'Transient.Unloaded',
+                                  'entries':[{'position':0,'path':'Transient.Unloaded.Bad'}]}]
+            (other/'network_metadata.json').write_text(json.dumps(data))
+            sdk=root/'sdk';generate_cpp_sdk(primary,sdk,extra_network_captures=[other])
+            result=json.loads((sdk/'network_metadata.json').read_text())
+            self.assertEqual(result['additional_captures'][0]['summary']['rejected_class_tables'],1)
+            self.assertEqual(result['summary']['rpc_field_net_indices_observed'],1)
 
 
 if __name__=='__main__':unittest.main()

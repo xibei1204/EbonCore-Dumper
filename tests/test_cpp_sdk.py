@@ -105,10 +105,16 @@ class CppSdkTests(unittest.TestCase):
             if setup is None and not shutil.which('cl'):
                 self.skipTest('MSVC build environment is unavailable')
         with tempfile.TemporaryDirectory(prefix='ebon-cpp-sdk-') as temporary:
-            root=Path(temporary);output=root/'sdk';generate_cpp_sdk(cpp_fixture(root),output)
+            root=Path(temporary);output=root/'sdk';source=cpp_fixture(root)
+            rows=[json.loads(line) for line in (source/'types.jsonl').read_text().splitlines()]
+            rows[2]['alignment']=8;rows[3]['size']=74
+            (source/'types.jsonl').write_text(''.join(json.dumps(row)+'\n' for row in rows))
+            generate_cpp_sdk(source,output)
             (output/'Mock.cpp').write_text(r'''#include "SDK.hpp"
 #include <cassert>
 using namespace SDK;
+#include <vector>
+#include <thread>
 static UActor Actor{};
 static void* Find(std::string_view path) {
     if(path=="/Script/Test.Default__Actor")return &Actor;
@@ -124,6 +130,59 @@ static void Event(void* object,void* function,void* buffer) {
         p.OutValue=42;p.ReturnValue=77;p.OutByte=5;
     }else {auto& p=*static_cast<Params_GetPosition*>(buffer);p.ReturnValue={1,2,3};}
 }
+static std::vector<std::byte> Memory(0x20000);
+static constexpr std::uintptr_t TestBase=0x10000000;
+static bool Holding=false,AllowGuard=true,ThrowEvent=false;
+static int Calls=0,Acquires=0,Releases=0;
+template<typename T> static void Put(std::uintptr_t offset,T value){std::memcpy(Memory.data()+offset,&value,sizeof(value));}
+static bool ReadTest(std::uintptr_t address,void* output,std::size_t size) {
+    if(address<TestBase||size>Memory.size()||address-TestBase>Memory.size()-size)return false;
+    std::memcpy(output,Memory.data()+address-TestBase,size);return true;
+}
+static bool Acquire(){if(!AllowGuard)return false;assert(!Holding);Holding=true;++Acquires;return true;}
+static void Release(){assert(Holding);Holding=false;++Releases;}
+static void NativeEvent(void*,void*,void*){assert(Holding);++Calls;if(ThrowEvent)throw std::runtime_error("mock event failed");}
+static void TestLifetime() {
+    Runtime::SetCallbacks(nullptr,nullptr);Runtime::SetMemoryReader(ReadTest);Runtime::Initialize(TestBase,0);
+    Put(16,TestBase+0x1000);Put(36,std::int32_t(5));Put(44,std::int32_t(1));Put(0x1000,TestBase+0x2000);
+    const std::string names[]={"Class","Foo","Call","New"};std::uint32_t ids[4]{};std::size_t cursor=0;
+    Put(16,TestBase+0x1000); // Object array and NamePool have zero RVAs in this fixture.
+    // Both headers share Base in the zero-RVA fixture. Chunk table is also the first FName block.
+    // Name entries live in the chunk table's first page, with the first 8 bytes reserved.
+    cursor=8;
+    for(unsigned i=0;i<4;++i){ids[i]=static_cast<std::uint32_t>(cursor/2);Put(0x1000+cursor,static_cast<std::uint16_t>(names[i].size()<<6));
+        std::memcpy(Memory.data()+0x1000+cursor+2,names[i].data(),names[i].size());cursor=(cursor+2+names[i].size()+1)&~std::size_t(1);}
+    Put(8,std::uint32_t(0));Put(12,static_cast<std::uint32_t>(cursor));
+    const auto init=[](int index,std::uint32_t name){const auto offset=0x5000+static_cast<std::uintptr_t>(index)*0x100;
+        Put(0x2000+index*24,TestBase+offset);Put(0x2000+index*24+16,std::int32_t(10+index));
+        Put(offset,TestBase+0x3000);Put(offset+12,std::int32_t(index));Put(offset+16,TestBase+0x5000);Put(offset+24,FName{name,0});return TestBase+offset;};
+    init(0,ids[0]);const auto object=init(1,ids[1]);const auto function=init(2,ids[2]);
+    Put(0x3000,reinterpret_cast<std::uintptr_t>(&NativeEvent));
+    assert(Runtime::FindObject("Foo")==reinterpret_cast<void*>(object));
+    const auto handle=Runtime::FindObjectHandle("Foo");assert(Runtime::ResolveObjectHandle(handle));
+    Put(0x2000+24+16,std::int32_t(99));assert(!Runtime::ResolveObjectHandle(handle)); // ABA: same address and name, new serial.
+    assert(Runtime::FindObject("Foo")==reinterpret_cast<void*>(object));
+    init(4,ids[3]);assert(Runtime::FindObject("New")); // Miss must rescan even with unchanged element count.
+    Put(0x5100+8,std::uint32_t(0x8000));assert(Runtime::ResolveObjectHandle(Runtime::MakeObjectHandle(reinterpret_cast<void*>(function))));
+    bool failed=false;try{Runtime::FindObject("Foo");}catch(const std::runtime_error&){failed=true;}assert(failed);
+    Put(0x5100+8,std::uint32_t(0));Put(0x2000+24+8,std::uint32_t(0x10000000));
+    failed=false;try{Runtime::ObjectName(reinterpret_cast<void*>(object));}catch(const std::runtime_error&){failed=true;}assert(failed);
+    Put(0x2000+24+8,std::uint32_t(0));
+    const auto notGarbage=Runtime::MakeObjectHandle(reinterpret_cast<void*>(object));
+    Put(0x2000+24+8,std::uint32_t(0x00200000));assert(!Runtime::ResolveObjectHandle(notGarbage));
+    Put(0x2000+24+8,std::uint32_t(0));
+    failed=false;try{Runtime::DispatchEvent(reinterpret_cast<void*>(object),reinterpret_cast<void*>(function),nullptr);}catch(const std::runtime_error&){failed=true;}assert(failed&&Calls==0);
+    Runtime::SetLifetimeGuard(Acquire,Release);
+    Runtime::Invoke(reinterpret_cast<void*>(object),"Call",nullptr);assert(Calls==1&&Acquires==1&&Releases==1&&!Holding);
+    ThrowEvent=true;failed=false;try{Runtime::Invoke(reinterpret_cast<void*>(object),"Call",nullptr);}catch(const std::runtime_error&){failed=true;}assert(failed&&Acquires==Releases&&!Holding);ThrowEvent=false;
+    const auto durable=Runtime::MakeObjectHandle(reinterpret_cast<void*>(object));Put(0x2000+24+16,std::int32_t(100));
+    failed=false;try{Runtime::Invoke(durable,"Call",nullptr);}catch(const std::runtime_error&){failed=true;}assert(failed&&Calls==2&&Acquires==Releases);
+    bool wrongThread=false;std::thread worker([&]{Runtime::SetCallbacks(nullptr,nullptr);try{Runtime::Invoke(reinterpret_cast<void*>(object),"Call",nullptr);}catch(const std::runtime_error&){wrongThread=true;}});worker.join();assert(wrongThread);
+    AllowGuard=false;failed=false;try{Runtime::Invoke(reinterpret_cast<void*>(object),"Call",nullptr);}catch(const std::runtime_error&){failed=true;}assert(failed&&!Holding);
+    Runtime::Initialize(TestBase,0);assert(!Runtime::ResolveObjectHandle(durable));
+    Put(0x2000+24+16,std::int32_t(0));failed=false;try{Runtime::MakeObjectHandle(reinterpret_cast<void*>(object));}catch(const std::runtime_error&){failed=true;}assert(failed);
+    Put(0x2000+24,std::uintptr_t(0x1234));assert(Runtime::ObjectPath(reinterpret_cast<void*>(object)).empty());
+}
 int main(){
     Runtime::SetCallbacks(Find,Event);
     std::int32_t out=9;std::uint8_t byte;assert(Actor.Adjust(3.5f,out,true,byte)==77 && out==42 && byte==5);
@@ -131,6 +190,7 @@ int main(){
     Actor.bActive=1;Actor.bVisible=1;assert(Actor.Bits_002C==5);
     UChild child{};child.Get_TailValue()=123;
     assert(*reinterpret_cast<const std::int32_t*>(reinterpret_cast<const std::byte*>(&child)+60)==123);
+    TestLifetime();
     return 0;
 }
 ''',encoding='utf-8')

@@ -8,11 +8,18 @@
 | C++ SDK 与入口 | [CPP_SDK_2026-11-14.md](CPP_SDK_2026-11-14.md) |
 | RPC / 复制元数据 | [NETWORK_METADATA_2026-11-14.md](NETWORK_METADATA_2026-11-14.md) |
 | 运行时网络映射 | [RUNTIME_MAPPING_2026-11-14.md](RUNTIME_MAPPING_2026-11-14.md) |
+| 好友 RPC / 子消息结构 | [FRIEND_RPC_2026-11-21.md](FRIEND_RPC_2026-11-21.md) |
+| 好友专用采集修复与重采步骤 | [FRIEND_CAPTURE_FIX_2026-11-21.md](FRIEND_CAPTURE_FIX_2026-11-21.md) |
+| 好友 RPC 协议规格（含静态路径与未决项） | [friend_rpc.protocol.spec.json](friend_rpc.protocol.spec.json) |
 | UE Local NetworkVersion | [NETWORK_VERSION_2026-11-15.md](NETWORK_VERSION_2026-11-15.md) |
 | NetworkVersion 实机确认报告 | [2026-11-15_逆向-NetworkVersion-report.md](2026-11-15_逆向-NetworkVersion-report.md) |
 | 完整复制布局补采 | [NETWORK_LAYOUT_CAPTURE_2026-11-15.md](NETWORK_LAYOUT_CAPTURE_2026-11-15.md) |
+| 角色根对象优先采集与 Elyms 缺项检查 | [CHARACTER_CAPTURE_2026-11-21.md](CHARACTER_CAPTURE_2026-11-21.md) |
+| 角色定向加载、自动导出与缺项审计 | [CHARACTER_LOADER.md](CHARACTER_LOADER.md) |
 | AES 索引密钥搜索 | [AES_HUNTER_2026-11-14.md](AES_HUNTER_2026-11-14.md) |
 | AES 抓取改为终端内 F9 触发 | [AES_HOTKEY_2026-11-20.md](AES_HOTKEY_2026-11-20.md) |
+| AES 旧产物、扫描顺序与重复结果修复 | [AES_REPAIR_2026-11-22.md](AES_REPAIR_2026-11-22.md) |
+| NTE Pak 索引验证、完整枚举与资源提取 | [PAK_REPAIR_2026-11-22.md](PAK_REPAIR_2026-11-22.md) |
 | F10 表行、配置与文本限制 | [RESOURCE_DUMP_2026-11-14.md](RESOURCE_DUMP_2026-11-14.md) |
 | 场景与离线资源扩展 | [RES_EXPANSION_2026-11-15.md](RES_EXPANSION_2026-11-15.md) |
 | 独立正文文件与旧 dump 保全 | [RESOURCE_BODIES_2026-11-15.md](RESOURCE_BODIES_2026-11-15.md) |
